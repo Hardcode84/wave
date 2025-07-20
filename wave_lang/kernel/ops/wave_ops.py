@@ -2660,3 +2660,10 @@ class ScatterAdd(CustomOp):
     @property
     def has_side_effects(self) -> bool:
         return True
+
+
+@define_op("fusing_op")
+@dataclass
+class FusingOp(CustomOp, ABC):
+    func: "Launchable"
+    args: list[fx.Node]

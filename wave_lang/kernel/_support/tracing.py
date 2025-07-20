@@ -144,6 +144,7 @@ class KernelTracer(SubgraphTracer):
     def create_arg(self, a):
         # Cannot import globally due to import cycles
         from ..wave.constraints import GenericDot
+        from ..wave.wave import LaunchableWave
 
         # Let IndexExpr persist as arguments.
         if isinstance(a, sympy.Basic):
@@ -156,6 +157,8 @@ class KernelTracer(SubgraphTracer):
         if isinstance(a, GenericDot):
             return a
         if isinstance(a, FunctionType):
+            return a
+        if isinstance(a, LaunchableWave):
             return a
         return super().create_arg(a)
 

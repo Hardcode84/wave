@@ -734,6 +734,20 @@ class LaunchableWave(Launchable):
         return f"tk.wave @{self._name}[{self.grid_type}]"
 
 
+from .._support.tracing import LaunchContext
+from ..ops.wave_ops import FusingOp
+
+
+class FusingLaunchContext(LaunchContext):
+    def __init__(self, region_graph: KernelRegionGraph):
+        super().__init__()
+        self.region_graph = region_graph
+
+    def launch(self, launchable: Launchable, args, kwargs):
+        assert not kwargs, "kwargs not supported"
+        FusingOp.handle(self.region_graph, func=launchable, args=args)
+
+
 class LaunchableWaveFused(LaunchableWave):
     def __init__(
         self,
@@ -757,7 +771,16 @@ class LaunchableWaveFused(LaunchableWave):
         str,
         WaveCompileOptions,
     ]:
-        breakpoint()
+        region_graph = KernelRegionGraph(
+            location_capture_config=options.location_capture_config, func=self._f
+        )
+
+        with FusingLaunchContext(region_graph):
+            with region_graph.subtracer() as subtracer:
+                root_name, _ = subtracer.trace(self._f)
+                trace = CapturedTrace(region_graph, root_name)
+
+        print_trace(trace)
 
 
 def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
