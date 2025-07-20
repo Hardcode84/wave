@@ -101,7 +101,7 @@ from .workgroup_reordering import reorder_workgroups
 logger = logging.getLogger(__name__)
 
 
-__all__ = ["wave", "wave_trace_only"]
+__all__ = ["wave", "wave_trace_only", "wave_pipeline"]
 
 # Warn only once
 _warned = False
@@ -734,12 +734,34 @@ class LaunchableWave(Launchable):
         return f"tk.wave @{self._name}[{self.grid_type}]"
 
 
-class LaunchableWaveFused(Launchable):
-    pass
+class LaunchableWaveFused(LaunchableWave):
+    def __init__(
+        self,
+        name: str,
+        eager_function: Callable[[Any], Any],
+        batch_dimensions: list[IndexExpr],
+    ):
+        super().__init__([], name, eager_function)
+        self.batch_dimensions = batch_dimensions
+
+    def _trace_and_get_kernel_signature(
+        self,
+        options: WaveCompileOptions,
+        context: Optional[Context] = None,
+        module_op: Optional[Operation] = None,
+    ) -> tuple[
+        builder.ModuleBuilder,
+        CapturedTrace,
+        dispatch_codegen.StreamExecutable,
+        kernel_codegen.KernelSignature,
+        str,
+        WaveCompileOptions,
+    ]:
+        breakpoint()
 
 
 def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
     def decorator(f: Callable[..., Any]) -> "LaunchableWaveFused":
-        return LaunchableWaveFused(f.__name__, f)
+        return LaunchableWaveFused(f.__name__, f, batch_dimensions)
 
     return decorator

@@ -213,6 +213,9 @@ def wave_compile(options: WaveCompileOptions, kernel: "LaunchableWave") -> WaveK
 
     cls = WaveKernelWithProfile if options.profile_python_wrapper else WaveKernel
 
+    if isinstance(options, Sequence):
+        options = options[0]
+
     # Check if this kernel has been compiled before, if the cache is enabled.
     cache_manager = None
     binary_path = None

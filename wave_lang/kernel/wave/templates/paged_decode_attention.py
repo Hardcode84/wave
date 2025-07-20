@@ -493,7 +493,6 @@ def get_paged_decode_attention_kernels(
             dynamic_symbols_1,
         )
 
-
     @tkw.wave_pipeline(batch_dimensions=[S])
     def fused(
         q: tkl.Memory[S, B, K1, GLOBAL_ADDRESS_SPACE, wave_input_dtype],
