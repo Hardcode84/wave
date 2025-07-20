@@ -4,7 +4,9 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+from math import prod
 import sys
+from itertools import chain
 from collections import namedtuple
 from dataclasses import dataclass
 from os import environ
@@ -96,6 +98,11 @@ class WaveEmitter:
             ),
         ]
 
+        self.linear_workgroup_id = gpu_d.block_id(
+            gpu_d.Dimension.x,
+            upper_bound=_get_upper_bound(prod(grid_type.dims)),
+        )
+
         threads_per_block = self.hardware_constraint.threads_per_block
         self.thread_ids = [
             gpu_d.thread_id(
@@ -108,6 +115,12 @@ class WaveEmitter:
                 gpu_d.Dimension.z, upper_bound=_get_upper_bound(threads_per_block[2])
             ),
         ]
+
+        self.linear_thread_id = gpu_d.thread_id(
+            gpu_d.Dimension.x,
+            upper_bound=_get_upper_bound(prod(threads_per_block)),
+        )
+
         self.induction_vars: dict[IndexSymbol, Value] = {}
         self.dynamic_dims: dict[IndexSymbol, Value] = {}
 
@@ -222,14 +235,23 @@ def add_emitter_subs(
     induction_vars, induction_var_syms = emitter.get_induction_vars_and_syms()
 
     # TODO: factor this out
-    all_symbols = emitter.thread_ids + emitter.workgroup_ids + induction_vars
-    dynamics = dict(
-        zip(
-            [THREAD_0, THREAD_1, THREAD_2, WORKGROUP_0, WORKGROUP_1, WORKGROUP_2]
-            + induction_var_syms,
-            all_symbols,
-        )
+    all_symbols = (
+        emitter.thread_ids
+        + emitter.workgroup_ids
+        + [emitter.linear_workgroup_id, emitter.linear_thread_id]
+        + induction_vars
     )
+    ids = [
+        THREAD_0,
+        THREAD_1,
+        THREAD_2,
+        WORKGROUP_0,
+        WORKGROUP_1,
+        WORKGROUP_2,
+        LINEAR_WORKGROUP,
+        LINEAR_THREAD,
+    ]
+    dynamics = dict(zip(chain(ids, induction_var_syms), all_symbols))
     dynamics.update(dynamic_values)
     dynamics.update(emitter.dynamic_dims)
     return dynamics

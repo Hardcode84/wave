@@ -13,6 +13,7 @@ SHARED_ADDRESS_SPACE = index_symbol("$SHARED_ADDRESS_SPACE")
 WORKGROUP_0 = index_symbol("$WG0")
 WORKGROUP_1 = index_symbol("$WG1")
 WORKGROUP_2 = index_symbol("$WG2")
+LINEAR_WORKGROUP = index_symbol("$WG_LINEAR")
 
 
 def get_workgroup_symbol(i: int):
@@ -26,6 +27,7 @@ def get_workgroup_symbol(i: int):
 THREAD_0 = index_symbol("$T0")
 THREAD_1 = index_symbol("$T1")
 THREAD_2 = index_symbol("$T2")
+LINEAR_THREAD = index_symbol("$T_LINEAR")
 
 # MMA symbols.
 MMA_LHS = index_symbol("$MMA_LHS")
