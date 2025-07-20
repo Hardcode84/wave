@@ -12,7 +12,9 @@ def push(context_type: Type[T], instance: T) -> T:
     The context type must define an attribute __wave_context_idname__ which is
     a valid/unique identifier.
     """
-    assert isinstance(instance, context_type)
+    assert isinstance(
+        instance, context_type
+    ), f"expected {context_type} but got {type(instance)}"
     key = context_type.__wave_context_idname__
     try:
         stack: list = getattr(_tls, key)
@@ -48,5 +50,7 @@ def current(context_type: Type[T]) -> T:
         instance = stack[-1]
     except IndexError:
         raise IndexError(f"No current context for {context_type}")
-    assert isinstance(instance, context_type)
+    assert isinstance(
+        instance, context_type
+    ), f"expected {context_type} but got {type(instance)}"
     return instance
