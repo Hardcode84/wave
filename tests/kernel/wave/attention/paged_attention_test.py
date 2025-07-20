@@ -344,6 +344,172 @@ def testPagedFlashDecoding(
 
 @require_e2e
 @require_cdna3
+@pytest.mark.parametrize("shape", shapes)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("enable_scheduling", [SchedulingType.NONE])
+@pytest.mark.parametrize("num_kv_splits", [8])
+@pytest.mark.parametrize(
+    "mfma_variant",
+    [
+        (MMAType.F32_16x16x16_F16, MMAType.F32_16x16x16_F16),
+    ],
+)
+@param_bool("use_wave_runtime", "wr")
+def testPagedFlashDecodingFused(
+    shape: tuple[int],
+    dtype: torch.dtype,
+    enable_scheduling: SchedulingType,
+    num_kv_splits: int,
+    mfma_variant: MMAType,
+    use_wave_runtime: bool,
+    run_bench,
+    perf_filename_tk2,
+):
+    kv_lens = shape[6]
+    shape = paged_decode_attention_shape(
+        num_query_heads=shape[0],
+        num_kv_heads=shape[1],
+        head_size=shape[2],
+        head_size_kv=shape[3],
+        block_size=shape[4],
+        num_seqs=shape[5],
+    )
+    assert shape.num_query_heads % shape.num_kv_heads == 0
+    scale = shape.head_size**-0.5
+
+    artifact_directory = None
+    if not artifact_directory:
+        (
+            query,
+            key_cache,
+            value_cache,
+            block_table,
+            request_indices,
+            kv_lens_tensor,
+        ) = create_inputs(
+            shape.num_seqs,
+            kv_lens,
+            shape.num_query_heads,
+            shape.num_kv_heads,
+            shape.head_size,
+            shape.head_size_kv,
+            dtype,
+        )
+    else:
+        (
+            query,
+            key_cache,
+            value_cache,
+            block_table,
+            request_indices,
+            kv_lens_tensor,
+        ) = load_inputs(artifact_directory)
+        shape.num_seqs = query.shape[0]
+        shape.num_query_heads = query.shape[1]
+        shape.head_size = query.shape[2]
+        shape.num_kv_heads = key_cache.shape[2]
+        shape.head_size_kv = value_cache.shape[3]
+
+    logit_cap = 30.0
+
+    # Run the wave kernel.
+    (
+        kernel_fused,
+        hyperparams_0,
+        hyperparams_1,
+        dynamic_symbols_0,
+        dynamic_symbols_1,
+    ) = get_paged_decode_attention_kernels(
+        shape,
+        mfma_variant,
+        num_kv_splits,
+        input_dtype=dtype,
+        output_dtype=dtype,
+        logit_cap=logit_cap,
+        fused=True,
+    )
+    hyperparams_0.update(get_default_scheduling_params())
+    hyperparams_1.update(get_default_scheduling_params())
+
+    phase_0_output_shape, phase_0_output_max_shape = (
+        get_paged_decode_intermediate_arrays_shapes(shape, num_kv_splits)
+    )
+
+    phase_0_output = device_zeros(phase_0_output_shape, dtype=torch.float32)
+    phase_0_output_max = device_zeros(phase_0_output_max_shape, dtype=torch.float32)
+    output = device_zeros(
+        shape.num_seqs, shape.num_query_heads, shape.head_size_kv, dtype=dtype
+    )
+
+    options_0 = WaveCompileOptions(
+        subs=hyperparams_0,
+        canonicalize=True,
+        run_bench=run_bench,
+        schedule=enable_scheduling,
+        use_scheduling_barriers=enable_scheduling_barriers,
+        dynamic_symbols=dynamic_symbols_0,
+        wave_runtime=use_wave_runtime,
+        benchmark_batch_size=10,
+        benchmark_repetitions=3,
+        benchmark_results_file=perf_filename_tk2[0],
+    )
+    options_0 = set_default_run_config(options_0)
+    options_1 = WaveCompileOptions(
+        subs=hyperparams_1,
+        canonicalize=True,
+        run_bench=run_bench,
+        schedule=enable_scheduling,
+        use_scheduling_barriers=enable_scheduling_barriers,
+        dynamic_symbols=dynamic_symbols_1,
+        wave_runtime=use_wave_runtime,
+        benchmark_batch_size=10,
+        benchmark_repetitions=3,
+        benchmark_results_file=perf_filename_tk2[1],
+    )
+    options_1 = set_default_run_config(options_1)
+
+    kernel_fused = wave_compile([options_0, options_1], kernel_fused)
+    asm = kernel_fused(
+        query,
+        key_cache,
+        value_cache,
+        request_indices,
+        block_table,
+        phase_0_output,
+        phase_0_output_max,
+        output,
+    )
+
+    if dump_generated_mlir:
+        filename = f"wave_paged_fused_kernel_{'x'.join(map(str, shape))}.mlir"
+        with open(filename, "w") as f:
+            f.write(asm)
+
+    if not artifact_directory:
+        # Run the reference implementation.
+        ref_vllm_output = ref_paged_attn(
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=torch.ones(shape.num_seqs, dtype=torch.int32),
+            request_indices=request_indices,
+            block_tables=block_table,
+            scale=scale,
+            causal=False,
+            sliding_window=None,
+            soft_cap=logit_cap,
+        )
+    else:
+        ref_vllm_output = torch.load(os.path.join(artifact_directory, "output.pt"))
+
+    if dtype == torch.bfloat16:
+        assert_close(output, ref_vllm_output, rtol=1e-2, atol=1e-2, check_dtype=False)
+    else:
+        assert_close(output, ref_vllm_output, rtol=1e-3, atol=1e-3)
+
+
+@require_e2e
+@require_cdna3
 @pytest.mark.parametrize("shape", mha_shapes)
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("enable_scheduling", [SchedulingType.NONE])

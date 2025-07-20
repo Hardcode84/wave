@@ -732,3 +732,14 @@ class LaunchableWave(Launchable):
 
     def __repr__(self):
         return f"tk.wave @{self._name}[{self.grid_type}]"
+
+
+class LaunchableWaveFused(Launchable):
+    pass
+
+
+def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
+    def decorator(f: Callable[..., Any]) -> "LaunchableWaveFused":
+        return LaunchableWaveFused(f.__name__, f)
+
+    return decorator

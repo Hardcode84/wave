@@ -61,6 +61,7 @@ def get_paged_decode_attention_kernels(
     output_dtype: torch.dtype = torch.float16,
     layer_scaling: Optional[float] = None,
     logit_cap: float = 0.0,
+    fused: bool = False,
 ):
     """
     Supports multi-head attention (MHA), multi-query attention (MQA), and
@@ -482,9 +483,33 @@ def get_paged_decode_attention_kernels(
     dynamic_symbols_0 = [K2, N_KV, S]
     dynamic_symbols_1 = [S]
 
+    if not fused:
+        return (
+            phase_0,
+            phase_1,
+            symbols_0,
+            symbols_1,
+            dynamic_symbols_0,
+            dynamic_symbols_1,
+        )
+
+
+    @tkw.wave_pipeline(batch_dimensions=[S])
+    def fused(
+        q: tkl.Memory[S, B, K1, GLOBAL_ADDRESS_SPACE, wave_input_dtype],
+        k: tkl.Memory[N_KV, BH, K1, ADDRESS_SPACE, wave_input_dtype],
+        v: tkl.Memory[N_KV, BH, N, ADDRESS_SPACE, wave_input_dtype],
+        request_indices: tkl.Memory[S, GLOBAL_ADDRESS_SPACE, tkl.i32],
+        kv_indices: tkl.Memory[K2, GLOBAL_ADDRESS_SPACE, tkl.i32],
+        logits: tkl.Memory[U, S, B, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        logits_max: tkl.Memory[U, S, B, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        output: tkl.Memory[S, B, N, GLOBAL_ADDRESS_SPACE, wave_output_dtype],
+    ):
+        phase_0(q, k, v, request_indices, kv_indices, logits, logits_max)
+        phase_1(logits, logits_max, request_indices, output)
+
     return (
-        phase_0,
-        phase_1,
+        fused,
         symbols_0,
         symbols_1,
         dynamic_symbols_0,
