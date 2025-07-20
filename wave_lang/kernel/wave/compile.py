@@ -213,6 +213,7 @@ def wave_compile(options: WaveCompileOptions, kernel: "LaunchableWave") -> WaveK
 
     cls = WaveKernelWithProfile if options.profile_python_wrapper else WaveKernel
 
+    options_list = options
     if isinstance(options, Sequence):
         options = options[0]
 
@@ -283,7 +284,7 @@ def wave_compile(options: WaveCompileOptions, kernel: "LaunchableWave") -> WaveK
             entrypoint_name,
             options,
             debug_arg_info,
-        ) = kernel._trace_and_get_kernel_signature(options)
+        ) = kernel._trace_and_get_kernel_signature(options_list)
         options.kernel_sig = kernel_sig
 
         # Get the trace from the kernel. Since the trace contains complex objects

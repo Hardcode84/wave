@@ -740,6 +740,8 @@ class LaunchableWave(Launchable):
 
 from .._support.tracing import LaunchContext
 from ..ops.wave_ops import FusingOp
+from copy import copy
+from math import prod
 
 
 class FusingLaunchContext(LaunchContext):
@@ -750,7 +752,7 @@ class FusingLaunchContext(LaunchContext):
 
     def launch(self, launchable: Launchable, args, kwargs):
         assert not kwargs, "kwargs not supported"
-        node = FusingOp.handle(self.region_graph, func=launchable, args=args)
+        FusingOp.handle(self.region_graph, func=launchable, args=args)
         self.launchables.add(launchable)
 
 
@@ -766,7 +768,7 @@ class LaunchableWaveFused(LaunchableWave):
 
     def _trace_and_get_kernel_signature(
         self,
-        options: WaveCompileOptions,
+        options: list[WaveCompileOptions],
     ) -> tuple[
         builder.ModuleBuilder,
         CapturedTrace,
@@ -776,17 +778,34 @@ class LaunchableWaveFused(LaunchableWave):
         WaveCompileOptions,
     ]:
         region_graph = KernelRegionGraph(
-            location_capture_config=options.location_capture_config, func=self._f
+            location_capture_config=options[0].location_capture_config, func=self._f
         )
 
         with FusingLaunchContext(region_graph) as context:
             with region_graph.subtracer() as subtracer:
                 root_name, _ = subtracer.trace(self._f)
-                trace = CapturedTrace(region_graph, root_name)
+                root_trace = CapturedTrace(region_graph, root_name)
 
-        launchables = context.launchables
+        print_trace(root_trace)
 
-        print_trace(trace)
+        max_threads = 0
+        total_blocks = 0
+        for launchable, option in zip(context.launchables, options):
+            with IndexingContext() as idxc:
+                idxc.subs = copy(option.subs)
+                trace = launchable._trace_and_run_passes(option)
+                launchable._infer_work_shape(option)
+
+            threads = prod(option.kernel_launch_info.blocks)
+            max_threads = max(max_threads, threads)
+            total_blocks += prod(launchable.grid_type.dims)
+
+            print(option.kernel_launch_info.blocks)
+            print(launchable.grid_type.dims)
+
+        print(f"max_threads: {max_threads}")
+        print(f"total_blocks: {total_blocks}")
+
         breakpoint()
 
 
