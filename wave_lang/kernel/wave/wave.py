@@ -18,7 +18,6 @@ import torch.fx as fx
 from sympy.utilities.lambdify import lambdastr
 
 import wave_lang.kernel.lang as tkl
-from wave_lang.support.ir_imports import Context, Module, Operation
 
 from .._support.indexing import IndexExpr, IndexingContext, index_symbol
 from .._support.location_config import LocationCaptureConfig
@@ -452,8 +451,6 @@ class LaunchableWave(Launchable):
     def compile_to_mlir(
         self,
         trace: CapturedTrace,
-        context: Context,
-        module_op: Optional[Module] = None,
         options: WaveCompileOptions = None,
     ):
         entrypoint_name = self._name
@@ -466,7 +463,7 @@ class LaunchableWave(Launchable):
         if options.print_signature:
             print(kernel_sig)
 
-        mb = builder.ModuleBuilder(context=context, module_op=module_op)
+        mb = builder.ModuleBuilder()
         exe = dispatch_codegen.StreamExecutable(mb, name=entrypoint_name)
         workgroup_size = self.hardware_constraints[0].threads_per_block
         subgroup_size = self.hardware_constraints[0].threads_per_wave
@@ -552,34 +549,7 @@ class LaunchableWave(Launchable):
             partial(remove_chained_getresult, trace),
         ]
 
-    def _trace_and_get_kernel_signature(
-        self,
-        options: WaveCompileOptions,
-        context: Optional[Context] = None,
-        module_op: Optional[Operation] = None,
-    ) -> tuple[
-        builder.ModuleBuilder,
-        CapturedTrace,
-        dispatch_codegen.StreamExecutable,
-        kernel_codegen.KernelSignature,
-        str,
-        WaveCompileOptions,
-        Sequence[DebugArgInfo],
-    ]:
-        # Issue a warning if IREE ver is too low.
-        # Warning will only be issued if we are compiling the kernel and won't
-        # if we are using cached kernel as we don't want to add any additional
-        # overhead to 'happy' path.
-        _warn_iree_is_too_old()
-
-        # Build wave runtime, if specified.
-        if options.wave_runtime:
-            # Remove any existing hsaco files in this directory.
-            # If the kernel is being cached, then it will be referenced from the
-            # cache directory. When kernels are not being cached, we remove them
-            # to ensure that at any time there is only one hsaco file in this directory.
-            remove_files_with_extension(get_temp_binary_dir(), ".hsaco")
-
+    def _trace_and_run_passes(self, options: WaveCompileOptions) -> CapturedTrace:
         print_ir_after = options.print_ir_after
         print_ir_before = options.print_ir_before
         profile_pass = options.profile_pass
@@ -688,6 +658,36 @@ class LaunchableWave(Launchable):
             print(f"***After final pass {p.__name__}***\n")
             print_trace(trace)
 
+        return trace
+
+    def _trace_and_get_kernel_signature(
+        self,
+        options: WaveCompileOptions,
+    ) -> tuple[
+        builder.ModuleBuilder,
+        CapturedTrace,
+        dispatch_codegen.StreamExecutable,
+        kernel_codegen.KernelSignature,
+        str,
+        WaveCompileOptions,
+        Sequence[DebugArgInfo],
+    ]:
+        # Issue a warning if IREE ver is too low.
+        # Warning will only be issued if we are compiling the kernel and won't
+        # if we are using cached kernel as we don't want to add any additional
+        # overhead to 'happy' path.
+        _warn_iree_is_too_old()
+
+        # Build wave runtime, if specified.
+        if options.wave_runtime:
+            # Remove any existing hsaco files in this directory.
+            # If the kernel is being cached, then it will be referenced from the
+            # cache directory. When kernels are not being cached, we remove them
+            # to ensure that at any time there is only one hsaco file in this directory.
+            remove_files_with_extension(get_temp_binary_dir(), ".hsaco")
+
+        trace = self._trace_and_run_passes(options)
+
         # Determine grid shape.
         self.infer_grid_shape(IndexingContext.current())
         if options.print_grid:
@@ -719,7 +719,7 @@ class LaunchableWave(Launchable):
                 idxc.bind_constant(sym, 0)
 
         return (
-            *self.compile_to_mlir(trace, context, module_op, options=options),
+            *self.compile_to_mlir(trace, options=options),
             options,
             debug_arg_info,
         )
@@ -742,10 +742,12 @@ class FusingLaunchContext(LaunchContext):
     def __init__(self, region_graph: KernelRegionGraph):
         super().__init__()
         self.region_graph = region_graph
+        self.launchables = {}
 
     def launch(self, launchable: Launchable, args, kwargs):
         assert not kwargs, "kwargs not supported"
-        FusingOp.handle(self.region_graph, func=launchable, args=args)
+        node = FusingOp.handle(self.region_graph, func=launchable, args=args)
+        self.launchables[node] = launchable
 
 
 class LaunchableWaveFused(LaunchableWave):
@@ -761,8 +763,6 @@ class LaunchableWaveFused(LaunchableWave):
     def _trace_and_get_kernel_signature(
         self,
         options: WaveCompileOptions,
-        context: Optional[Context] = None,
-        module_op: Optional[Operation] = None,
     ) -> tuple[
         builder.ModuleBuilder,
         CapturedTrace,
