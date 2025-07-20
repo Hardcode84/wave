@@ -790,21 +790,82 @@ class LaunchableWaveFused(LaunchableWave):
 
         max_threads = 0
         total_blocks = 0
+        subgroup_size = None
+        traces = []
+        entrypoint_name = None
+        dynamic_symbols = set()
         for launchable, option in zip(context.launchables, options):
             with IndexingContext() as idxc:
                 idxc.subs = copy(option.subs)
+                print(option.subs)
                 trace = launchable._trace_and_run_passes(option)
                 launchable._infer_work_shape(option)
 
-            threads = prod(option.kernel_launch_info.blocks)
+                threads = prod(subs_idxc(x) for x in option.kernel_launch_info.blocks)
+                total_blocks += prod(subs_idxc(x) for x in launchable.grid_type.dims)
+
             max_threads = max(max_threads, threads)
-            total_blocks += prod(launchable.grid_type.dims)
+            traces.append(trace)
+            entrypoint_name = (
+                entrypoint_name + "_" + launchable._name
+                if entrypoint_name
+                else launchable._name
+            )
+            dynamic_symbols.update(option.dynamic_symbols)
+            if subgroup_size is None:
+                subgroup_size = launchable.hardware_constraints[0].threads_per_wave
+            else:
+                assert (
+                    subgroup_size == launchable.hardware_constraints[0].threads_per_wave
+                ), f"Subgroup size mismatch: {subgroup_size} != {launchable.hardware_constraints[0].threads_per_wave}"
 
             print(option.kernel_launch_info.blocks)
             print(launchable.grid_type.dims)
 
         print(f"max_threads: {max_threads}")
         print(f"total_blocks: {total_blocks}")
+
+        grid_type = Grid[tuple((total_blocks, 1, 1))]
+        grid_type.dims = [total_blocks, 1, 1]
+
+        dynamic_symbols = list(dynamic_symbols)
+        root_graph = root_trace.get_root_graph()
+        kernel_sig = kernel_codegen.KernelSignature()
+        kernel_sig.add_from_graph_placeholders(root_graph)
+        kernel_sig.add_from_dynamic_symbols(dynamic_symbols)
+        kernel_sig.add_grid(grid_type)
+        kernel_sig.determine_input_output_buffers(root_graph)
+
+        print(kernel_sig)
+
+        root_options = options[0]
+
+        if root_options.print_signature:
+            print(kernel_sig)
+
+        mb = builder.ModuleBuilder()
+        exe = dispatch_codegen.StreamExecutable(mb, name=entrypoint_name)
+        workgroup_size = (max_threads, 1, 1)
+
+        # Setup LLVM func compilation configs.
+        llvm_func_config = {}
+        if root_options.denorm_fp_math_f32:
+            llvm_func_config["denormal-fp-math-f32"] = root_options.denorm_fp_math_f32
+
+        if root_options.waves_per_eu:
+            llvm_func_config["amdgpu-waves-per-eu"] = root_options.waves_per_eu
+
+        dispatch_entrypoint = exe.define_entrypoint(
+            entrypoint_name,
+            kernel_sig,
+            grid_type,
+            workgroup_size,
+            subgroup_size,
+            dynamic_symbols,
+            llvm_func_config,
+        )
+
+        print(mb.module_op)
 
         breakpoint()
 
