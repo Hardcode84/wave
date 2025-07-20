@@ -660,6 +660,29 @@ class LaunchableWave(Launchable):
 
         return trace
 
+    def _infer_work_shape(self, options: WaveCompileOptions):
+        # Determine grid shape.
+        self.infer_grid_shape(IndexingContext.current())
+        if options.print_grid:
+            print(f"Grid: {self.grid_type}")
+
+        # Add grid and block dims to kernel launch info.
+        # Convert the grid into a lambda that we can use to compute the grid dimension.
+        hw_constraint = get_hardware_constraint(self.constraints)
+        grid_symbols = list(self.bound_scalar_symbols.keys()) + list(
+            options.dynamic_symbols
+        )
+        options.kernel_launch_info.grid = sympy.lambdify(
+            [grid_symbols], self.grid_type.dims
+        )
+        options.kernel_launch_info.grid_str = lambdastr(
+            [grid_symbols], self.grid_type.dims
+        )
+        options.kernel_launch_info.blocks = [
+            int(x) for x in hw_constraint.threads_per_block
+        ]
+        options.kernel_launch_info.func_name = self._name
+
     def _trace_and_get_kernel_signature(
         self,
         options: WaveCompileOptions,
@@ -688,28 +711,9 @@ class LaunchableWave(Launchable):
 
         trace = self._trace_and_run_passes(options)
 
-        # Determine grid shape.
-        self.infer_grid_shape(IndexingContext.current())
-        if options.print_grid:
-            print(f"Grid: {self.grid_type}")
+        self._infer_work_shape(options)
 
-        # Add grid and block dims to kernel launch info.
-        # Convert the grid into a lambda that we can use to compute the grid dimension.
         hw_constraint = get_hardware_constraint(self.constraints)
-        grid_symbols = list(self.bound_scalar_symbols.keys()) + list(
-            options.dynamic_symbols
-        )
-        options.kernel_launch_info.grid = sympy.lambdify(
-            [grid_symbols], self.grid_type.dims
-        )
-        options.kernel_launch_info.grid_str = lambdastr(
-            [grid_symbols], self.grid_type.dims
-        )
-        options.kernel_launch_info.blocks = [
-            int(x) for x in hw_constraint.threads_per_block
-        ]
-        options.kernel_launch_info.func_name = self._name
-
         idxc = IndexingContext.current()
         for sym, val in zip(
             [THREAD_0, THREAD_1, THREAD_2, WORKGROUP_0, WORKGROUP_1, WORKGROUP_2],
@@ -742,12 +746,12 @@ class FusingLaunchContext(LaunchContext):
     def __init__(self, region_graph: KernelRegionGraph):
         super().__init__()
         self.region_graph = region_graph
-        self.launchables = {}
+        self.launchables = set()
 
     def launch(self, launchable: Launchable, args, kwargs):
         assert not kwargs, "kwargs not supported"
         node = FusingOp.handle(self.region_graph, func=launchable, args=args)
-        self.launchables[node] = launchable
+        self.launchables.add(launchable)
 
 
 class LaunchableWaveFused(LaunchableWave):
@@ -775,12 +779,15 @@ class LaunchableWaveFused(LaunchableWave):
             location_capture_config=options.location_capture_config, func=self._f
         )
 
-        with FusingLaunchContext(region_graph):
+        with FusingLaunchContext(region_graph) as context:
             with region_graph.subtracer() as subtracer:
                 root_name, _ = subtracer.trace(self._f)
                 trace = CapturedTrace(region_graph, root_name)
 
+        launchables = context.launchables
+
         print_trace(trace)
+        breakpoint()
 
 
 def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
