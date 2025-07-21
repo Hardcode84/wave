@@ -742,6 +742,7 @@ from .._support.tracing import LaunchContext
 from ..ops.wave_ops import FusingOp
 from copy import copy
 from math import prod
+from ..compiler.ir import InsertionPoint
 
 
 class FusingLaunchContext(LaunchContext):
@@ -749,11 +750,14 @@ class FusingLaunchContext(LaunchContext):
         super().__init__()
         self.region_graph = region_graph
         self.launchables = set()
+        self.launchable_by_node = {}
 
     def launch(self, launchable: Launchable, args, kwargs):
         assert not kwargs, "kwargs not supported"
-        FusingOp.handle(self.region_graph, func=launchable, args=args)
+        node = FusingOp.handle(self.region_graph, func=launchable, args=args)
         self.launchables.add(launchable)
+        idx = len(self.launchables) - 1
+        self.launchable_by_node[node] = (launchable, idx)
 
 
 class LaunchableWaveFused(LaunchableWave):
@@ -864,6 +868,48 @@ class LaunchableWaveFused(LaunchableWave):
             dynamic_symbols,
             llvm_func_config,
         )
+
+        workgroup_offset = 0
+        ip = InsertionPoint(dispatch_entrypoint.entry_block)
+        for node in root_graph.nodes:
+            custom = get_custom(node)
+            if not isinstance(custom, FusingOp):
+                continue
+
+            first = workgroup_offset == 0
+
+            launchable, idx = context.launchable_by_node[node]
+            option = options[idx]
+            trace = traces[idx]
+            with IndexingContext() as idxc:
+                idxc.subs = copy(option.subs)
+                threads = [subs_idxc(x) for x in option.kernel_launch_info.blocks]
+                blocks = [subs_idxc(x) for x in launchable.grid_type.dims]
+                total_threads = prod(threads)
+                total_blocks = prod(blocks)
+                thread_id = LINEAR_THREAD
+                workgroup_id = LINEAR_WORKGROUP - workgroup_offset
+                idxc.subs.update(
+                    {
+                        THREAD_0: thread_id % threads[0],
+                        THREAD_1: (thread_id // threads[0]) % threads[1],
+                        THREAD_2: (thread_id // (threads[0] * threads[1])) % threads[2],
+                        WORKGROUP_0: workgroup_id % blocks[0],
+                        WORKGROUP_1: (workgroup_id // blocks[0]) % blocks[1],
+                        WORKGROUP_2: (workgroup_id // (blocks[0] * blocks[1]))
+                        % blocks[2],
+                    }
+                )
+                emitter = WaveEmitter(
+                    dispatch_entrypoint,
+                    trace,
+                    launchable.constraints,
+                    option,
+                    launchable.grid_type,
+                )
+                emitter.ip = ip
+
+            breakpoint()
 
         print(mb.module_op)
 

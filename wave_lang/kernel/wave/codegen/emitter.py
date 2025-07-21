@@ -98,10 +98,7 @@ class WaveEmitter:
             ),
         ]
 
-        self.linear_workgroup_id = gpu_d.block_id(
-            gpu_d.Dimension.x,
-            upper_bound=_get_upper_bound(prod(grid_type.dims)),
-        )
+        self.linear_workgroup_id = gpu_d.block_id(gpu_d.Dimension.x)
 
         threads_per_block = self.hardware_constraint.threads_per_block
         self.thread_ids = [
@@ -116,10 +113,7 @@ class WaveEmitter:
             ),
         ]
 
-        self.linear_thread_id = gpu_d.thread_id(
-            gpu_d.Dimension.x,
-            upper_bound=_get_upper_bound(prod(threads_per_block)),
-        )
+        self.linear_thread_id = gpu_d.thread_id(gpu_d.Dimension.x)
 
         self.induction_vars: dict[IndexSymbol, Value] = {}
         self.dynamic_dims: dict[IndexSymbol, Value] = {}
