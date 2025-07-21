@@ -39,6 +39,7 @@ from wave_lang.support.ir_imports import (
     arith_d,
     func_d,
     gpu_d,
+    scf_d,
     vector_d,
 )
 
@@ -196,6 +197,29 @@ class WaveEmitter:
     @property
     def hardware_constraint(self) -> HardwareConstraint:
         return get_hardware_constraint(self.constraints)
+
+    def emit_if(self, condition: IndexExpr):
+        with self.ip, Location.unknown():
+            if_op = scf_d.IfOp(condition, with_else=False)
+            then_block = if_op.then_block
+            with InsertionPoint(then_block):
+                scf_d.YieldOp([])
+
+            return InsertionPoint(then_block)
+
+    def emit_if_else(
+        self, condition: IndexExpr
+    ) -> tuple[InsertionPoint, InsertionPoint]:
+        with self.ip, Location.unknown():
+            if_op = scf_d.IfOp(condition, with_else=True)
+            then_block = if_op.then_block
+            else_block = if_op.else_block
+            with InsertionPoint(then_block):
+                scf_d.YieldOp([])
+            with InsertionPoint(else_block):
+                scf_d.YieldOp([])
+
+        return InsertionPoint(then_block), InsertionPoint(else_block)
 
 
 def handle_op(op: Callable[..., Any] | list[Callable[..., Any]]):

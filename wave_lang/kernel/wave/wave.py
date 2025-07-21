@@ -742,7 +742,6 @@ from .._support.tracing import LaunchContext
 from ..ops.wave_ops import FusingOp
 from copy import copy
 from math import prod
-from ..compiler.ir import InsertionPoint
 
 
 class FusingLaunchContext(LaunchContext):
@@ -869,14 +868,20 @@ class LaunchableWaveFused(LaunchableWave):
             llvm_func_config,
         )
 
+        emitter = WaveEmitter(
+            dispatch_entrypoint,
+            trace,
+            [],
+            root_options,
+            grid_type,
+        )
+        old_ip = emitter.ip
+
         workgroup_offset = 0
-        ip = InsertionPoint(dispatch_entrypoint.entry_block)
         for node in root_graph.nodes:
             custom = get_custom(node)
             if not isinstance(custom, FusingOp):
                 continue
-
-            first = workgroup_offset == 0
 
             launchable, idx = context.launchable_by_node[node]
             option = options[idx]
@@ -889,6 +894,7 @@ class LaunchableWaveFused(LaunchableWave):
                 total_blocks = prod(blocks)
                 thread_id = LINEAR_THREAD
                 workgroup_id = LINEAR_WORKGROUP - workgroup_offset
+                workgroup_offset += total_blocks
                 idxc.subs.update(
                     {
                         THREAD_0: thread_id % threads[0],
@@ -900,16 +906,23 @@ class LaunchableWaveFused(LaunchableWave):
                         % blocks[2],
                     }
                 )
-                emitter = WaveEmitter(
-                    dispatch_entrypoint,
-                    trace,
-                    launchable.constraints,
-                    option,
-                    launchable.grid_type,
-                )
-                emitter.ip = ip
+                emitter.constraints = launchable.constraints
+                emitter.dynamic_symbols = option.dynamic_symbols
+                emitter.options = option
 
-            breakpoint()
+                condition = workgroup_id < total_blocks
+                then_ip, else_ip = emitter.emit_if_else(condition)
+
+                if total_threads < max_threads:
+                    condition = thread_id < total_threads
+                    then_ip = emitter.emit_if(condition)
+
+                emitter.ip = then_ip
+                emitter.emit(trace.get_root_graph())
+                emitter.ip = else_ip
+
+        emitter.ip = old_ip
+        emitter.finish()
 
         print(mb.module_op)
 
