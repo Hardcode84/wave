@@ -209,13 +209,13 @@ def wave_compile(options: WaveCompileOptions, kernel: "LaunchableWave") -> WaveK
     """
     Compiles the wave kernel to an executable.
     """
-    validate_options(options)
-
-    cls = WaveKernelWithProfile if options.profile_python_wrapper else WaveKernel
-
     options_list = options
     if isinstance(options, Sequence):
         options = options[0]
+
+    validate_options(options)
+
+    cls = WaveKernelWithProfile if options.profile_python_wrapper else WaveKernel
 
     # Check if this kernel has been compiled before, if the cache is enabled.
     cache_manager = None

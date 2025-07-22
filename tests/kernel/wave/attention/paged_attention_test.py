@@ -446,7 +446,6 @@ def testPagedFlashDecodingFused(
         canonicalize=True,
         run_bench=run_bench,
         schedule=enable_scheduling,
-        use_scheduling_barriers=enable_scheduling_barriers,
         dynamic_symbols=dynamic_symbols_0,
         wave_runtime=use_wave_runtime,
         benchmark_batch_size=10,
@@ -459,7 +458,6 @@ def testPagedFlashDecodingFused(
         canonicalize=True,
         run_bench=run_bench,
         schedule=enable_scheduling,
-        use_scheduling_barriers=enable_scheduling_barriers,
         dynamic_symbols=dynamic_symbols_1,
         wave_runtime=use_wave_runtime,
         benchmark_batch_size=10,
@@ -479,11 +477,6 @@ def testPagedFlashDecodingFused(
         phase_0_output_max,
         output,
     )
-
-    if dump_generated_mlir:
-        filename = f"wave_paged_fused_kernel_{'x'.join(map(str, shape))}.mlir"
-        with open(filename, "w") as f:
-            f.write(asm)
 
     if not artifact_directory:
         # Run the reference implementation.
