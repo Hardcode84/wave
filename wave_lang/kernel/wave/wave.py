@@ -748,13 +748,13 @@ class FusingLaunchContext(LaunchContext):
     def __init__(self, region_graph: KernelRegionGraph):
         super().__init__()
         self.region_graph = region_graph
-        self.launchables = set()
+        self.launchables = {}
         self.launchable_by_node = {}
 
     def launch(self, launchable: Launchable, args, kwargs):
         assert not kwargs, "kwargs not supported"
-        node = FusingOp.handle(self.region_graph, func=launchable, args=args)
-        self.launchables.add(launchable)
+        node = FusingOp.handle(self.region_graph, func=launchable, args=args).node
+        self.launchables[launchable] = None
         idx = len(self.launchables) - 1
         self.launchable_by_node[node] = (launchable, idx)
 
@@ -800,7 +800,6 @@ class LaunchableWaveFused(LaunchableWave):
         for launchable, option in zip(context.launchables, options):
             with IndexingContext() as idxc:
                 idxc.subs = copy(option.subs)
-                print(option.subs)
                 trace = launchable._trace_and_run_passes(option)
                 launchable._infer_work_shape(option)
 
@@ -839,8 +838,6 @@ class LaunchableWaveFused(LaunchableWave):
         kernel_sig.add_grid(grid_type)
         kernel_sig.determine_input_output_buffers(root_graph)
 
-        print(kernel_sig)
-
         root_options = options[0]
 
         if root_options.print_signature:
@@ -875,6 +872,9 @@ class LaunchableWaveFused(LaunchableWave):
             root_options,
             grid_type,
         )
+        with emitter.ip, emitter.loc:
+            emitter.emit_program_invariants()
+
         old_ip = emitter.ip
 
         workgroup_offset = 0
@@ -911,11 +911,12 @@ class LaunchableWaveFused(LaunchableWave):
                 emitter.options = option
 
                 condition = workgroup_id < total_blocks
-                then_ip, else_ip = emitter.emit_if_else(condition)
+                with emitter.ip, emitter.loc:
+                    then_ip, else_ip = emitter.emit_if_else(condition)
 
-                if total_threads < max_threads:
-                    condition = thread_id < total_threads
-                    then_ip = emitter.emit_if(condition)
+                    if total_threads < max_threads:
+                        condition = thread_id < total_threads
+                        then_ip = emitter.emit_if(condition)
 
                 emitter.ip = then_ip
                 emitter.emit(trace.get_root_graph())

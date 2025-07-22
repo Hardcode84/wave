@@ -56,6 +56,9 @@ from ..utils.symbol_utils import subs_idxc, is_literal
 
 
 def _get_upper_bound(expr: Any) -> Optional[Attribute]:
+    if expr is None:
+        return None
+
     res = subs_idxc(expr)
     if is_literal(res):
         return IntegerAttr.get(IndexType.get(), int(res))
@@ -100,7 +103,11 @@ class WaveEmitter:
 
         self.linear_workgroup_id = gpu_d.block_id(gpu_d.Dimension.x)
 
-        threads_per_block = self.hardware_constraint.threads_per_block
+        if self.constraints:
+            threads_per_block = self.hardware_constraint.threads_per_block
+        else:
+            threads_per_block = [None, None, None]
+
         self.thread_ids = [
             gpu_d.thread_id(
                 gpu_d.Dimension.x, upper_bound=_get_upper_bound(threads_per_block[0])
@@ -125,15 +132,19 @@ class WaveEmitter:
                 self.dynamic_dims[bind.symbol_type] = arg
 
     def emit(self, graph: Optional[fx.Graph] = None):
-        with self.ip, Location.unknown():
+        with self.ip, self.loc:
             self.emit_program_invariants()
             self._emit_graph(
                 graph if graph is not None else self.trace.get_root_graph()
             )
 
     def finish(self):
-        with self.ip, Location.unknown():
+        with self.ip, self.loc:
             func_d.ReturnOp([])
+
+    @property
+    def loc(self):
+        return Location.unknown()
 
     def _emit_graph(self, graph: fx.Graph):
         """Emits the given graph at the current insertion point."""
@@ -199,19 +210,21 @@ class WaveEmitter:
         return get_hardware_constraint(self.constraints)
 
     def emit_if(self, condition: IndexExpr):
-        with self.ip, Location.unknown():
-            if_op = scf_d.IfOp(condition, with_else=False)
+        with self.ip, self.loc:
+            condition = gen_sympy_index(add_emitter_subs(self), condition)
+            if_op = scf_d.IfOp(condition)
             then_block = if_op.then_block
             with InsertionPoint(then_block):
                 scf_d.YieldOp([])
 
-            return InsertionPoint(then_block)
+            return InsertionPoint.at_block_terminator(then_block)
 
     def emit_if_else(
         self, condition: IndexExpr
     ) -> tuple[InsertionPoint, InsertionPoint]:
-        with self.ip, Location.unknown():
-            if_op = scf_d.IfOp(condition, with_else=True)
+        with self.ip, self.loc:
+            condition = gen_sympy_index(add_emitter_subs(self), condition)
+            if_op = scf_d.IfOp(condition, hasElse=True)
             then_block = if_op.then_block
             else_block = if_op.else_block
             with InsertionPoint(then_block):
@@ -219,7 +232,9 @@ class WaveEmitter:
             with InsertionPoint(else_block):
                 scf_d.YieldOp([])
 
-        return InsertionPoint(then_block), InsertionPoint(else_block)
+        return InsertionPoint.at_block_terminator(
+            then_block
+        ), InsertionPoint.at_block_terminator(else_block)
 
 
 def handle_op(op: Callable[..., Any] | list[Callable[..., Any]]):
