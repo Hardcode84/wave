@@ -549,14 +549,14 @@ class LaunchableWave(Launchable):
             partial(remove_chained_getresult, trace),
         ]
 
-    def _trace_and_run_passes(self, options: WaveCompileOptions) -> CapturedTrace:
+    def _trace_and_run_passes(
+        self, options: WaveCompileOptions, debug_arg_info: list[DebugArgInfo]
+    ) -> CapturedTrace:
         print_ir_after = options.print_ir_after
         print_ir_before = options.print_ir_before
         profile_pass = options.profile_pass
         if options.print_trace_begin:
             print(f"\n***Tracing kernel {self._name}***")
-
-        debug_arg_info = []
 
         trace = self._trace(location_capture_config=options.location_capture_config)
         if (
@@ -709,7 +709,8 @@ class LaunchableWave(Launchable):
             # to ensure that at any time there is only one hsaco file in this directory.
             remove_files_with_extension(get_temp_binary_dir(), ".hsaco")
 
-        trace = self._trace_and_run_passes(options)
+        debug_arg_info = []
+        trace = self._trace_and_run_passes(options, debug_arg_info)
 
         self._infer_work_shape(options)
 
@@ -800,7 +801,8 @@ class LaunchableWaveFused(LaunchableWave):
         for launchable, option in zip(context.launchables, options):
             with IndexingContext() as idxc:
                 idxc.subs = copy(option.subs)
-                trace = launchable._trace_and_run_passes(option)
+                debug_arg_info = []
+                trace = launchable._trace_and_run_passes(option, debug_arg_info)
                 launchable._infer_work_shape(option)
 
                 threads = prod(subs_idxc(x) for x in option.kernel_launch_info.blocks)
