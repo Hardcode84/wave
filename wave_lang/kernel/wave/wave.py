@@ -742,9 +742,23 @@ class LaunchableWave(Launchable):
 
 
 from .._support.tracing import LaunchContext
-from ..ops.wave_ops import FusingOp
-from copy import copy
+from ..ops.wave_ops import FusingOp, Placeholder
+from ..compiler.builder import IRProxyValue
 from math import prod
+
+
+# Filter function to check for placeholder nodes.
+def is_placeholder(node: fx.Node):
+    return isinstance(get_custom(node), Placeholder)
+
+
+# Util fn to filter nodes in a graph based on specfied filter fn.
+def filter_fx_graph(graph: fx.Graph, filter: Callable[[fx.Node], bool]):
+    filtered_nodes: list[fx.Node] = []
+    for node in graph.nodes:
+        if filter(node):
+            filtered_nodes.append(node)
+    return filtered_nodes
 
 
 class FusingLaunchContext(LaunchContext):
@@ -802,7 +816,7 @@ class LaunchableWaveFused(LaunchableWave):
         dynamic_symbols = set()
         for launchable, option in zip(context.launchables, options):
             with IndexingContext() as idxc:
-                idxc.subs = copy(option.subs)
+                idxc.set_subs(option.subs)
                 launchable.initialize_wave_constraints()
                 launchable.initialize_symbolic_constraints()
                 launchable.initialize_workgroup_constraints()
@@ -891,6 +905,8 @@ class LaunchableWaveFused(LaunchableWave):
             if not isinstance(custom, FusingOp):
                 continue
 
+            print(f"FusingOp: {node}")
+
             launchable, idx = context.launchable_by_node[node]
             option = options[idx]
             trace = traces[idx]
@@ -912,6 +928,7 @@ class LaunchableWaveFused(LaunchableWave):
                     WORKGROUP_2: (workgroup_id // (blocks[0] * blocks[1])) % blocks[2],
                 }
                 idxc.set_subs(idxc.subs | linearize_subs)
+                idxc.finalize()
                 emitter.constraints = launchable.constraints
                 emitter.dynamic_symbols = option.dynamic_symbols
                 emitter.options = option
@@ -925,7 +942,16 @@ class LaunchableWaveFused(LaunchableWave):
                         then_ip = emitter.emit_if(condition)
 
                 emitter.ip = then_ip
-                emitter.emit(trace.get_root_graph())
+                graph = trace.get_root_graph()
+                with emitter.ip, emitter.loc:
+                    placeholder_nodes = filter_fx_graph(graph, is_placeholder)
+                    placeholder_nodes.sort(key=lambda x: x.meta["arg_id"])
+                    for outer_arg, inner_arg in zip(custom.args, placeholder_nodes):
+                        values = list(
+                            map(IRProxyValue, emitter.lookup_node_values(outer_arg))
+                        )
+                        emitter.bind_node_proxies(inner_arg, values)
+                emitter.emit(graph)
                 emitter.ip = else_ip
 
         emitter.ip = old_ip
@@ -933,7 +959,7 @@ class LaunchableWaveFused(LaunchableWave):
 
         print(mb.module_op)
 
-        breakpoint()
+        # breakpoint()
 
 
 def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
