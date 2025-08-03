@@ -889,7 +889,7 @@ class LaunchableWaveFused(LaunchableWave):
             option = options[idx]
             trace = traces[idx]
             with IndexingContext() as idxc:
-                idxc.subs = copy(option.subs)
+                idxc.set_subs(option.subs)
                 threads = [subs_idxc(x) for x in option.kernel_launch_info.blocks]
                 blocks = [subs_idxc(x) for x in launchable.grid_type.dims]
                 total_threads = prod(threads)
@@ -897,17 +897,15 @@ class LaunchableWaveFused(LaunchableWave):
                 thread_id = LINEAR_THREAD
                 workgroup_id = LINEAR_WORKGROUP - workgroup_offset
                 workgroup_offset += total_blocks
-                idxc.subs.update(
-                    {
-                        THREAD_0: thread_id % threads[0],
-                        THREAD_1: (thread_id // threads[0]) % threads[1],
-                        THREAD_2: (thread_id // (threads[0] * threads[1])) % threads[2],
-                        WORKGROUP_0: workgroup_id % blocks[0],
-                        WORKGROUP_1: (workgroup_id // blocks[0]) % blocks[1],
-                        WORKGROUP_2: (workgroup_id // (blocks[0] * blocks[1]))
-                        % blocks[2],
-                    }
-                )
+                linearize_subs = {
+                    THREAD_0: thread_id % threads[0],
+                    THREAD_1: (thread_id // threads[0]) % threads[1],
+                    THREAD_2: (thread_id // (threads[0] * threads[1])) % threads[2],
+                    WORKGROUP_0: workgroup_id % blocks[0],
+                    WORKGROUP_1: (workgroup_id // blocks[0]) % blocks[1],
+                    WORKGROUP_2: (workgroup_id // (blocks[0] * blocks[1])) % blocks[2],
+                }
+                idxc.set_subs(idxc.subs | linearize_subs)
                 emitter.constraints = launchable.constraints
                 emitter.dynamic_symbols = option.dynamic_symbols
                 emitter.options = option
