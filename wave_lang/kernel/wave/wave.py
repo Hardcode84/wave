@@ -320,6 +320,8 @@ class LaunchableWave(Launchable):
         from the hardware constraints.
 
         """
+        if not self.hardware_constraints:
+            return
 
         hardware_constraint = self.hardware_constraints[0]
         for wave_constraint in self.wave_constraints:
@@ -801,6 +803,10 @@ class LaunchableWaveFused(LaunchableWave):
         for launchable, option in zip(context.launchables, options):
             with IndexingContext() as idxc:
                 idxc.subs = copy(option.subs)
+                launchable.initialize_wave_constraints()
+                launchable.initialize_symbolic_constraints()
+                launchable.initialize_workgroup_constraints()
+
                 debug_arg_info = []
                 trace = launchable._trace_and_run_passes(option, debug_arg_info)
                 launchable._infer_work_shape(option)
