@@ -910,6 +910,7 @@ class LaunchableWaveFused(LaunchableWave):
             launchable, idx = context.launchable_by_node[node]
             option = options[idx]
             trace = traces[idx]
+            emitter.trace = trace
             with IndexingContext() as idxc:
                 idxc.set_subs(option.subs)
                 threads = [subs_idxc(x) for x in option.kernel_launch_info.blocks]
