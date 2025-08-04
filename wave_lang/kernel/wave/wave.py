@@ -896,6 +896,23 @@ class LaunchableWaveFused(LaunchableWave):
         )
         with emitter.ip, emitter.loc:
             emitter.emit_program_invariants()
+            for node in root_graph.nodes:
+                custom = get_custom(node)
+                if not isinstance(custom, FusingOp):
+                    continue
+
+                _, idx = context.launchable_by_node[node]
+                option = options[idx]
+                trace = traces[idx]
+                graph = trace.get_root_graph()
+                with emitter.ip, emitter.loc:
+                    placeholder_nodes = filter_fx_graph(graph, is_placeholder)
+                    placeholder_nodes.sort(key=lambda x: x.meta["arg_id"])
+                    for outer_arg, inner_arg in zip(custom.args, placeholder_nodes):
+                        values = list(
+                            map(IRProxyValue, emitter.lookup_node_values(outer_arg))
+                        )
+                        emitter.bind_node_proxies(inner_arg, values)
 
         old_ip = emitter.ip
 
@@ -945,22 +962,23 @@ class LaunchableWaveFused(LaunchableWave):
                 emitter.ip = then_ip
                 graph = trace.get_root_graph()
                 with emitter.ip, emitter.loc:
-                    placeholder_nodes = filter_fx_graph(graph, is_placeholder)
-                    placeholder_nodes.sort(key=lambda x: x.meta["arg_id"])
-                    for outer_arg, inner_arg in zip(custom.args, placeholder_nodes):
-                        values = list(
-                            map(IRProxyValue, emitter.lookup_node_values(outer_arg))
-                        )
-                        emitter.bind_node_proxies(inner_arg, values)
-                emitter.emit(graph)
+                    # placeholder_nodes = filter_fx_graph(graph, is_placeholder)
+                    # placeholder_nodes.sort(key=lambda x: x.meta["arg_id"])
+                    # for outer_arg, inner_arg in zip(custom.args, placeholder_nodes):
+                    #     values = list(
+                    #         map(IRProxyValue, emitter.lookup_node_values(outer_arg))
+                    #     )
+                    #     emitter.bind_node_proxies(inner_arg, values)
+                    emitter._emit_graph(graph)
                 emitter.ip = else_ip
 
         emitter.ip = old_ip
         emitter.finish()
 
         print(mb.module_op)
+        mb.module_op.verify()
 
-        # breakpoint()
+        breakpoint()
 
 
 def wave_pipeline(batch_dimensions: list[IndexExpr] = []):
