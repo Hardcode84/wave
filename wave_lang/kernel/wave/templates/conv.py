@@ -130,7 +130,7 @@ def get_igemm_conv2d(
 
     constraints += [
         tkw.HardwareConstraint(
-            threads_per_wave=64,
+            threads_per_wave=32,
         )
     ]
     # Bind iterators to dimensions

@@ -134,7 +134,7 @@ def test_dump_vmfb(shape, tmp_path):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 @check_leaks
@@ -147,7 +147,7 @@ def test_copy(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -191,7 +191,7 @@ def test_copy(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_dynamic_copy(shape, use_buffer_ops, run_bench):
@@ -203,7 +203,7 @@ def test_dynamic_copy(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -247,7 +247,7 @@ def test_dynamic_copy(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_transpose_read"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_transpose_read(shape, use_buffer_ops, run_bench):
@@ -256,7 +256,7 @@ def test_transpose_read(shape, use_buffer_ops, run_bench):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_N = 1
     BLOCK_M = sympy.Max(sympy.Min(M, 256), wave_size)
 
@@ -305,7 +305,7 @@ def test_transpose_read(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_transpose_write"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_transpose_write(shape, use_buffer_ops, run_bench):
@@ -313,7 +313,7 @@ def test_transpose_write(shape, use_buffer_ops, run_bench):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     BLOCK_N = sympy.Max(sympy.Min(N, 256), wave_size)
 
@@ -362,7 +362,7 @@ def test_transpose_write(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_offset_read(shape, use_buffer_ops, run_bench):
@@ -374,7 +374,7 @@ def test_offset_read(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -436,7 +436,7 @@ def test_offset_read(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_offset_read_one(shape, use_buffer_ops, run_bench):
@@ -449,7 +449,7 @@ def test_offset_read_one(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -516,7 +516,7 @@ def test_offset_read_one(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_read_write_same(shape, use_buffer_ops, run_bench):
@@ -528,7 +528,7 @@ def test_read_write_same(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -570,7 +570,7 @@ def test_read_write_same(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 def test_set_symbol(shape, run_bench):
     M = tkl.sym.M
@@ -582,7 +582,7 @@ def test_set_symbol(shape, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
 
@@ -649,7 +649,7 @@ def test_set_symbol(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 def test_apply_expr(shape, run_bench):
     M = tkl.sym.M
@@ -661,7 +661,7 @@ def test_apply_expr(shape, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
 
@@ -729,7 +729,7 @@ def test_apply_expr(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 def test_conditional(shape, run_bench):
     M = tkl.sym.M
@@ -740,7 +740,7 @@ def test_conditional(shape, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # TODO: Only ELEMS_PER_THREAD == 1
     # BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -792,7 +792,7 @@ def test_conditional(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 @param_bool("use_buffer_ops", "buf_ops")
 def test_offset_write(shape, use_buffer_ops, run_bench):
@@ -804,7 +804,7 @@ def test_offset_write(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -872,7 +872,7 @@ def test_offset_write(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize(
     "shape",
     mark_shapes_skip(get_test_shapes("test_copy"), [(111, 813)], "TODO: OOB scatter"),
@@ -888,7 +888,7 @@ def test_offset_write_one(shape, use_buffer_ops, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -965,7 +965,7 @@ def test_offset_write_one(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_reduce_sum"))
 def test_reduce_sum(shape, run_bench):
     M = tkl.sym.M
@@ -1020,13 +1020,13 @@ def test_reduce_sum(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_common_test_shape("test_block_reduce"))
 def test_block_reduce_sum(shape, run_bench):
     round_to_divisible = lambda src, denom: sympy.ceiling(src / denom) * denom
     M = tkl.sym.M
     N = tkl.sym.N
-    wave_size = 64
+    wave_size = 32
     num_waves = 4
     BLOCK_M = 1
 
@@ -1082,12 +1082,12 @@ def test_block_reduce_sum(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_tiled_reduce_max"))
 def test_toy_online_softmax(shape):
     M = tkl.sym.M
     N = tkl.sym.N
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     BLOCK_N = tkl.sym.BLOCK_N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
@@ -1152,7 +1152,7 @@ def test_toy_online_softmax(shape):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 def test_im2col(run_bench):
     # TODO: we don't support unaligned access at the moment so all sizes must
     # be aligned to WG/Wave sizes, c * hw * wf == 8 and number of windows == 64.
@@ -1179,7 +1179,7 @@ def test_im2col(run_bench):
     # We unroll K dimension according to ELEMS_PER_THREAD value.
     # i.e. for K==8 we will have 2 vector.gather's.
     # Each WG will process 64 windows.
-    wave_size = 64
+    wave_size = 32
     BLOCK_K = hf * wf * c
     BLOCK_M = 64
     ELEMS_PER_THREAD = 4
@@ -1254,7 +1254,7 @@ def test_im2col(run_bench):
 
 # TODO: Fix test for CDNA2. CDNA2 seem to have worse accuracy, atol=0.0094, rtol=10.2405
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 def test_im2col_mma(run_bench):
     # igemm without final col2im
     n, c, h, w = 1, 4, 9, 9  # Image.
@@ -1451,7 +1451,7 @@ _layouts = [
 
 
 @require_e2e
-@require_cdna3
+# @require_cdna3
 @pytest.mark.parametrize("n, h, w, c, hf, wf, nf, stride", _igemm_cases)
 @pytest.mark.parametrize("mem_space", _mem_spaces)
 @pytest.mark.parametrize("layout", _layouts)
@@ -1541,7 +1541,7 @@ def test_igemm_conv(
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", [(256, 64)])
 def test_cast(shape, run_bench):
     M = tkl.sym.M
@@ -1552,7 +1552,7 @@ def test_cast(shape, run_bench):
     # split into blocks of size up to 256. We have single wave per WG,
     # and with default wave size of 64, each thread is operating on up to 4
     # elements.
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -1596,7 +1596,7 @@ def test_cast(shape, run_bench):
 
 
 @require_e2e
-@require_cdna3
+# @require_cdna3
 @pytest.mark.parametrize(
     "shape", get_test_shapes("test_copy")[:2]
 )  # testing on just two shapes.
@@ -1616,7 +1616,7 @@ def test_scalar_codegen(
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -1680,14 +1680,14 @@ def test_scalar_codegen(
 #  2. Scalars in Wave can be used for comparison/binaryOps
 #     as well as on select ops.
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_copy"))
 def test_scalar_cond_copy(shape, run_bench):
     M = tkl.sym.M
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     # Tile size cannot be dynamic, so we use a fixed value here.
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
@@ -1754,7 +1754,7 @@ def test_scalar_cond_copy(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize(
     "shape",
     [
@@ -1770,7 +1770,7 @@ def test_scalar_cond_copy(shape, run_bench):
 def test_scanop_cumsum(shape, run_bench):
     M = tkl.sym.M
     N = tkl.sym.N
-    wave_size = 64
+    wave_size = 32
     num_warps = 1
     BLOCK_M = 1
     BLOCK_N = sympy.ceiling(N / wave_size) * wave_size
@@ -1778,7 +1778,7 @@ def test_scanop_cumsum(shape, run_bench):
 
     constraints: list[tkw.Constraint] = [
         tkw.HardwareConstraint(
-            threads_per_wave=64,
+            threads_per_wave=wave_size,
             vector_shapes={M: 1, N: BLOCK_N // num_warps},
         )
     ]
@@ -1817,7 +1817,7 @@ def test_scanop_cumsum(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", get_test_shapes("test_vector_add")[:2])
 @param_bool("use_buffer_ops", "buf_ops")
 def test_vector_add(shape, use_buffer_ops, run_bench):
@@ -1876,7 +1876,7 @@ def test_vector_add(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", [(256, 256)])
 def test_broadcast_scaled_add(shape, run_bench):
     broadcast_scaled_add, hyperparams = get_broadcast_scaled_add(shape)
@@ -1903,7 +1903,7 @@ def test_broadcast_scaled_add(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", [(2, 128), (256, 1024)])
 @param_bool("use_buffer_ops", "buf_ops")
 def test_fused_softmax(shape, use_buffer_ops):
@@ -1911,7 +1911,7 @@ def test_fused_softmax(shape, use_buffer_ops):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
 
     constraints: list[tkw.Constraint] = [
@@ -1961,7 +1961,7 @@ def test_fused_softmax(shape, use_buffer_ops):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", [(2, 64)])
 @param_bool("use_buffer_ops", "buf_ops")
 def test_atomic_min(shape, use_buffer_ops, run_bench):
@@ -1969,9 +1969,9 @@ def test_atomic_min(shape, use_buffer_ops, run_bench):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 2
-    BLOCK_N = 64
+    BLOCK_N = 32
     num_waves = 2
 
     constraints: list[tkw.Constraint] = [
@@ -2044,7 +2044,7 @@ def test_atomic_min(shape, use_buffer_ops, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize("shape", [(48, 4, 128)])
 def test_self_index(shape, run_bench):
     M = tkl.sym.M
@@ -2052,7 +2052,7 @@ def test_self_index(shape, run_bench):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = shape[0]
     BLOCK_N = sympy.ceiling(N / wave_size) * wave_size
 
@@ -2107,7 +2107,7 @@ def test_self_index(shape, run_bench):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @pytest.mark.parametrize(
     "shape, elems_per_thread",
     [
@@ -2132,9 +2132,9 @@ def test_scatter_add(shape, elems_per_thread, request):
 
     constraints = [
         tkw.HardwareConstraint(
-            threads_per_wave=64,
+            threads_per_wave=32,
             waves_per_block=(1, 1, 1),
-            vector_shapes={M: 64, N: elems_per_thread},
+            vector_shapes={M: 32, N: elems_per_thread},
         ),
         tkw.WorkgroupConstraint(M, BLOCK_M, 0),
         tkw.WorkgroupConstraint(N, BLOCK_N, 1),
@@ -2215,7 +2215,7 @@ def test_scatter_add(shape, elems_per_thread, request):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 @param_bool("dynamic_dims", "dyn")
 def test_debug_log_core(dynamic_dims: bool):
     M = tkl.sym.M
@@ -2224,7 +2224,7 @@ def test_debug_log_core(dynamic_dims: bool):
 
     shape = (256, 128)
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
 
@@ -2319,7 +2319,7 @@ def test_debug_log_core(dynamic_dims: bool):
 
 
 @require_e2e
-@require_cdna_2_or_3_or_4
+# @require_cdna_2_or_3_or_4
 def test_debug_log_iteration_dims():
     iterations = 4
 
@@ -2338,7 +2338,7 @@ def test_debug_log_iteration_dims():
         tkw.WaveConstraint(M, BLOCK_M / 2),
         tkw.WaveConstraint(N, BLOCK_N / 2),
         tkw.HardwareConstraint(
-            threads_per_wave=64, mma_type=tkw.MMAType.F32_16x16x16_F16
+            threads_per_wave=32, mma_type=tkw.MMAType.F32_16x16x16_F16
         ),
     ]
 

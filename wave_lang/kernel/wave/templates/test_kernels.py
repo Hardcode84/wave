@@ -26,7 +26,7 @@ def get_broadcast_scaled_add(shape):
     N = tkl.sym.N
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
 
-    wave_size = 64
+    wave_size = 32
     BLOCK_M = 1
     BLOCK_N = sympy.Max(sympy.Min(shape[1], 256), wave_size)
 
