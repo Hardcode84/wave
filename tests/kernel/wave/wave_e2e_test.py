@@ -230,8 +230,10 @@ def test_dynamic_copy(shape, use_buffer_ops, run_bench):
         res = tkw.read(a)
         tkw.write(res, b)
 
-    a = device_randn(shape, dtype=torch.float16)
-    b = device_zeros(shape, dtype=torch.float16)
+    a = torch.randn(shape, dtype=torch.float16)
+    aa = a
+    a = a.to("cuda")
+    b = torch.zeros(shape, dtype=torch.float16).to("cuda")
     options = WaveCompileOptions(
         subs={
             M: shape[0],
@@ -246,7 +248,7 @@ def test_dynamic_copy(shape, use_buffer_ops, run_bench):
     test = wave_compile(options, test)
 
     test(a, b)
-    assert_close(a, b)
+    assert_close(aa, b)
 
 
 @require_e2e
