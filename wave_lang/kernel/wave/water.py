@@ -451,16 +451,19 @@ def water_lowering_pipeline(module: Module, options: WaveCompileOptions) -> Modu
         "pipeline": "any(canonicalize,cse)",
     }
 
+    int_range_optimizations = "composite-fixed-point-pass", {
+        "name": "int-range-optimizations",
+        "pipeline": 'any(int-range-optimizations,arith-int-range-narrowing{int-bitwidths-supported="8,16,32"},canonicalize,cse)',
+    }
+
     llvm_opt_level = 3 if options.optimization_level else 0
     dump_intermediates = options.dump_intermediates or ""
     toolkit_path = get_water_mlir_dir()
 
     pipeline = [
         "lower-affine",
-        *add_opt(canonicalize_cse),
+        *add_opt(int_range_optimizations),
         *add_opt("loop-invariant-code-motion"),
-        *add_opt("int-range-optimizations"),
-        *add_opt(("arith-int-range-narrowing", {"int-bitwidths-supported": "8,16,32"})),
         "convert-scf-to-cf",
         ("convert-amdgpu-to-rocdl", {"chipset": target_chip}),
         ("water-alloc-to-alloca", {}, "gpu.module"),
