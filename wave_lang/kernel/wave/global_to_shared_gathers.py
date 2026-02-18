@@ -31,7 +31,6 @@ from .minimize_global_loads import (
 from .utils.general_utils import (
     ceildiv,
     has_write_shared_user,
-    infer_dim,
     is_gather,
 )
 from .utils.symbol_utils import subs_idxc
@@ -84,18 +83,12 @@ and the load contiguously from global memory.
 
 def is_valid_global_gather(node: fx.Node) -> bool:
     custom = get_custom(node)
-    if not isinstance(custom, Read):
-        return False
-    if subs_idxc(custom.memory_type.address_space) != GLOBAL_ADDRESS_SPACE:
-        return False
-    if not has_write_shared_user(custom):
-        return False
-    if is_gather(custom):
-        return True
-    # Also treat mapped reads with non-identity input mappings as candidates.
-    if custom.mapping is not None and not custom.mapping.is_input_identity():
-        return True
-    return False
+    return (
+        isinstance(custom, Read)
+        and subs_idxc(custom.memory_type.address_space) == GLOBAL_ADDRESS_SPACE
+        and has_write_shared_user(custom)
+        and is_gather(custom)
+    )
 
 
 def make_contiguous_index(read: Read) -> dict[IndexSymbol, IndexSequence]:
@@ -391,90 +384,6 @@ def add_optimized_nodes(
     return optimized_writes, shared_read_metadata
 
 
-def add_optimized_mapped_nodes(
-    optimizable_loads: dict[fx.Node, tuple[int, Read]],
-    constraint_tile_size: dict[IndexSymbol, int],
-    hardware_constraint: HardwareConstraint,
-) -> tuple[dict[fx.Node, list[fx.Node]], dict]:
-    """
-    Add optimized global read and shared write nodes for mapped non-gather reads.
-    Unlike add_optimized_nodes (for gathers), this creates raw contiguous reads
-    without a mapping. The original mapping is passed through to shared reads
-    via shared_read_metadata so they can navigate the data in shared memory.
-    """
-    optimized_writes = defaultdict(list)
-    shared_read_metadata: dict[Write, SharedReadMetadata] = {}
-    for memory, (
-        expected_number_of_loads,
-        custom_loads,
-        _,
-        load_elems_per_thread,
-        max_elements_per_load,
-    ) in optimizable_loads.items():
-        custom = custom_loads[0]
-        original_access_pattern = deepcopy(custom.index)
-
-        # Build access pattern keyed by base symbols matching the memory dim order.
-        # E.g. memory has (M, K/32), index has (K, M) → access_pattern uses (M, K).
-        mem_shape = custom.memory_type.symbolic_shape
-        access_pattern = {}
-        for dim_expr in mem_shape:
-            base = infer_dim(dim_expr)
-            if base in custom.index:
-                access_pattern[base] = deepcopy(custom.index[base])
-            elif dim_expr in custom.index:
-                access_pattern[base] = deepcopy(custom.index[dim_expr])
-            else:
-                assert False, f"Cannot find index entry for memory dim {dim_expr}"
-
-        materialized_shape = materialize_shape(
-            constraint_tile_size, mem_shape, custom.vector_shapes
-        )
-
-        for i in range(expected_number_of_loads):
-            with custom.graph.inserting_before(custom.fx_node):
-                # Raw contiguous read without mapping.
-                read = Read(
-                    memory,
-                    load_elems_per_thread,
-                    None,
-                    flags=custom.flags,
-                ).add_to_graph(custom.graph, loc=custom.location, tag=custom.tag)
-                read.pre_expansion_id = custom.pre_expansion_id
-                read.vector_shapes = custom.vector_shapes
-                global_offset = (
-                    hardware_constraint.linearized_thread_id * load_elems_per_thread
-                    + i * max_elements_per_load
-                )
-                read.index = construct_min_global_access_pattern(
-                    access_pattern,
-                    global_offset,
-                    load_elems_per_thread,
-                    materialized_shape,
-                )
-                for custom_user in custom.users:
-                    if (
-                        isinstance(custom_user, Write)
-                        and custom_user.type.address_space == SHARED_ADDRESS_SPACE
-                    ):
-                        write = Write(
-                            read, custom_user.memory, load_elems_per_thread
-                        ).add_to_graph(
-                            custom.graph, loc=custom.location, tag=custom.tag
-                        )
-                        write.index = read.index
-                        write.pre_expansion_id = custom.pre_expansion_id
-                        optimized_writes[custom_user.memory].append(write)
-                        write.vector_shapes = custom.vector_shapes
-                        shared_read_metadata[write] = SharedReadMetadata(
-                            index=original_access_pattern,
-                            mapping=custom.mapping,
-                            memory_shape=tuple(mem_shape),
-                        )
-                        break
-    return optimized_writes, shared_read_metadata
-
-
 def global_to_shared_gathers(trace: CapturedTrace, constraints: list[Constraint]):
     """
     This function converts global gathers to shared gathers.
@@ -511,30 +420,12 @@ def global_to_shared_gathers(trace: CapturedTrace, constraints: list[Constraint]
         use_memory_type=True,
     )
 
-    # Split into gathers and mapped non-gather reads.
-    gather_loads = {}
-    mapped_loads = {}
-    for memory, load_info in optimizable_loads.items():
-        first_custom = load_info[1][0]
-        if is_gather(first_custom):
-            gather_loads[memory] = load_info
-        else:
-            mapped_loads[memory] = load_info
+    # Construct new global read nodes and write shared nodes.
+    optimized_writes, shared_read_metadata = add_optimized_nodes(
+        optimizable_loads,
+        constraint_tile_size,
+        hardware_constraint,
+    )
 
-    # Handle gathers with existing code path.
-    if gather_loads:
-        optimized_writes, shared_read_metadata = add_optimized_nodes(
-            gather_loads,
-            constraint_tile_size,
-            hardware_constraint,
-        )
-        update_write_dependencies(optimized_writes, trace, shared_read_metadata)
-
-    # Handle mapped non-gather reads with raw contiguous loads.
-    if mapped_loads:
-        optimized_writes, shared_read_metadata = add_optimized_mapped_nodes(
-            mapped_loads,
-            constraint_tile_size,
-            hardware_constraint,
-        )
-        update_write_dependencies(optimized_writes, trace, shared_read_metadata)
+    # Update all write dependencies.
+    update_write_dependencies(optimized_writes, trace, shared_read_metadata)
