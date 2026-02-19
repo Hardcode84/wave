@@ -32,6 +32,7 @@ from ..ops.wave_ops import Allocate, ExtractSlice, Read, Write, get_custom
 from ..wave.constraints import (
     Constraint,
     HardwareConstraint,
+    TilingConstraint,
 )
 from .utils.general_utils import (
     has_write_shared_user,
@@ -68,16 +69,18 @@ def _safe_mod(a, b):
     return sympy.Mod(a, b, evaluate=False)
 
 
-def _strip_global_indices(expr):
-    """Remove workgroup and tiling variables, keeping only thread IDs.
+def _get_global_subs(constraints: list[Constraint]) -> dict:
+    """Build substitutions to zero workgroup IDs and tiling induction vars.
 
-    Shared memory addresses are tile-local, so global indices
-    (workgroup IDs, induction variables) must be zeroed. Doing it
-    early avoids sympy Mod bug re-triggering during later subs().
+    Only zeros symbols that represent global indices (workgroup position
+    and loop induction variables). Preserves constants like BLOCK_M that
+    appear in wave offset expressions.
     """
-    keep = {THREAD_0, THREAD_1, THREAD_2, GPR_NUM}
-    to_zero = {s: 0 for s in expr.free_symbols if s not in keep}
-    return expr.subs(to_zero) if to_zero else expr
+    subs = {WORKGROUP_0: 0, WORKGROUP_1: 0, WORKGROUP_2: 0}
+    for c in constraints:
+        if isinstance(c, TilingConstraint) and c.induction_var is not None:
+            subs[c.induction_var] = 0
+    return subs
 
 
 def _layout_row(k, m):
@@ -156,11 +159,12 @@ def preshuffle_scale_to_shared(trace: CapturedTrace, constraints: list[Constrain
 
                 dims = list(shared_write.index.keys())
                 k_dim, m_dim = dims[0], dims[1]
-                # Strip global indices early to keep only thread-local
-                # offsets and avoid re-triggering sympy Mod bug during
-                # later subs() in apply_shared_memory_indexing_corrections.
-                k_expr = _strip_global_indices(shared_write.index[k_dim].start)
-                m_expr = _strip_global_indices(shared_write.index[m_dim].start)
+                # Zero workgroup IDs and induction vars to get tile-local
+                # offsets. Preserves constants (e.g. BLOCK_M) needed for
+                # wave offset expressions.
+                global_subs = _get_global_subs(constraints)
+                k_expr = shared_write.index[k_dim].start.subs(global_subs)
+                m_expr = shared_write.index[m_dim].start.subs(global_subs)
                 write_ept = subs_idxc(shared_write.elements_per_thread)
 
                 # Collect shared reads before modifying the graph.
@@ -211,8 +215,8 @@ def preshuffle_scale_to_shared(trace: CapturedTrace, constraints: list[Constrain
                 # a single row expression lets merge_contiguous_reads see
                 # all 8 reads as contiguous in the column dimension.
                 first_sr = shared_reads[0]
-                k_first = _strip_global_indices(first_sr.index[k_dim].start)
-                m_first = _strip_global_indices(first_sr.index[m_dim].start)
+                k_first = first_sr.index[k_dim].start.subs(global_subs)
+                m_first = first_sr.index[m_dim].start.subs(global_subs)
                 common_row = _layout_row(k_first, m_first)
 
                 seen_cols = set()
