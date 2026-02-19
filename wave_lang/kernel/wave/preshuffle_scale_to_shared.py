@@ -59,20 +59,43 @@ def _is_preshuffle_scale_read(node) -> bool:
     return True
 
 
+def _safe_mod(a, b):
+    """Mod avoiding sympy bug #28744 (Mod(k*Mod(x,n), m) miscompiles).
+
+    See https://github.com/sympy/sympy/issues/28744 and
+    wave_lang/kernel/wave/utils/symbol_utils.py for details.
+    """
+    return sympy.Mod(a, b, evaluate=False)
+
+
+def _strip_global_indices(expr):
+    """Remove workgroup and tiling variables, keeping only thread IDs.
+
+    Shared memory addresses are tile-local, so global indices
+    (workgroup IDs, induction variables) must be zeroed. Doing it
+    early avoids sympy Mod bug re-triggering during later subs().
+    """
+    keep = {THREAD_0, THREAD_1, THREAD_2, GPR_NUM}
+    to_zero = {s: 0 for s in expr.free_symbols if s not in keep}
+    return expr.subs(to_zero) if to_zero else expr
+
+
 def _layout_row(k, m):
     """Compute row index in the custom [M, 8] shared layout.
 
     row = T0 (the reading thread), encoding which thread reads this byte.
+    Uses _safe_mod to avoid sympy bug #28744.
     """
-    return (k % 4) * 16 + (m % 16) + (m // 64) * 64
+    return _safe_mod(k, 4) * 16 + _safe_mod(m, 16) + (m // 64) * 64
 
 
 def _layout_col(k, m):
     """Compute column index in the custom [M, 8] shared layout.
 
     col = byte offset within the thread's 8-byte read vector.
+    Uses _safe_mod to avoid sympy bug #28744.
     """
-    return ((m % 64) // 16) * 2 + k // 4
+    return (_safe_mod(m, 64) // 16) * 2 + k // 4
 
 
 def preshuffle_scale_to_shared(trace: CapturedTrace, constraints: list[Constraint]):
@@ -133,8 +156,11 @@ def preshuffle_scale_to_shared(trace: CapturedTrace, constraints: list[Constrain
 
                 dims = list(shared_write.index.keys())
                 k_dim, m_dim = dims[0], dims[1]
-                k_expr = shared_write.index[k_dim].start
-                m_expr = shared_write.index[m_dim].start
+                # Strip global indices early to keep only thread-local
+                # offsets and avoid re-triggering sympy Mod bug during
+                # later subs() in apply_shared_memory_indexing_corrections.
+                k_expr = _strip_global_indices(shared_write.index[k_dim].start)
+                m_expr = _strip_global_indices(shared_write.index[m_dim].start)
                 write_ept = subs_idxc(shared_write.elements_per_thread)
 
                 # Collect shared reads before modifying the graph.
@@ -185,8 +211,8 @@ def preshuffle_scale_to_shared(trace: CapturedTrace, constraints: list[Constrain
                 # a single row expression lets merge_contiguous_reads see
                 # all 8 reads as contiguous in the column dimension.
                 first_sr = shared_reads[0]
-                k_first = first_sr.index[k_dim].start
-                m_first = first_sr.index[m_dim].start
+                k_first = _strip_global_indices(first_sr.index[k_dim].start)
+                m_first = _strip_global_indices(first_sr.index[m_dim].start)
                 common_row = _layout_row(k_first, m_first)
 
                 seen_cols = set()
