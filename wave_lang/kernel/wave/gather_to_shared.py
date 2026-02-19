@@ -63,6 +63,10 @@ def is_valid_read(node: fx.Node) -> bool:
     if subs_idxc(read.memory_type.address_space) != GLOBAL_ADDRESS_SPACE:
         return False
 
+    # Skip reads already handled by preshuffle_scale_to_shared.
+    if node.meta.get("skip_gather_to_shared", False):
+        return False
+
     return True
 
 
