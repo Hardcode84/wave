@@ -366,16 +366,21 @@ def _get_constant_value(candidate: Value):
 
 
 def _cast_buffer_and_encode_stride(
-    ptr: Value, strides: tuple[Value], elem_type: IrType, emitter: WaveEmitter
+    ptr: Value,
+    strides: tuple[Value],
+    elem_type: IrType,
+    emitter: WaveEmitter,
+    valid_bytes_val: Optional[Value] = None,
 ) -> Value:
     uint64 = IntegerType.get_signless(64)
     uint14 = IntegerType.get_signless(14)
 
-    valid_bytes = _valid_bytes_buffer(
-        elem_type
-    )  # max bytes that are in range to be addressed from a buffer
-    valid_bytes_constant = get_constant_attr(valid_bytes, uint64)
-    valid_bytes_constant = arith_d.constant(uint64, valid_bytes_constant)
+    if valid_bytes_val is not None:
+        valid_bytes_constant = arith_d.index_cast(uint64, valid_bytes_val)
+    else:
+        valid_bytes = _valid_bytes_buffer(elem_type)
+        valid_bytes_constant = get_constant_attr(valid_bytes, uint64)
+        valid_bytes_constant = arith_d.constant(uint64, valid_bytes_constant)
     stride_rank = len(strides)
     swizzle_stride = None
 
@@ -556,7 +561,15 @@ def _create_vec_read_write(
         mem, offset_th = _linearize_memref(
             mem, start_indices_wg, start_indices_th, strides
         )
-        mem = _cast_buffer_and_encode_stride(mem, strides, element_type, emitter)
+        # Compute actual buffer size so the SRD boundsCheck works correctly
+        # for vector loads that may read past the logical boundary.
+        elem_byte_width = element_type.width // 8
+        buf_size_expr = sympy.Mul(*symbolic_shape) * elem_byte_width
+        subs = add_emitter_subs(emitter)
+        valid_bytes_val = gen_sympy_index(subs, buf_size_expr)
+        mem = _cast_buffer_and_encode_stride(
+            mem, strides, element_type, emitter, valid_bytes_val
+        )
 
     indices = [offset_th] if buffer_ops_enabled else start_indices
 
@@ -564,6 +577,9 @@ def _create_vec_read_write(
         # find the index at which memory out of bounds of buffer
         oob_index_value = _get_out_of_bounds_index(element_type)
         oob_index = arith_d.constant(IndexType.get(), oob_index_value)
+
+        # Save scalar offset before broadcasting to vector.
+        scalar_offset_th = offset_th
 
         oob_index = vector_d.broadcast(
             VectorType.get(vector_type.shape, IndexType.get()), oob_index
@@ -585,7 +601,6 @@ def _create_vec_read_write(
 
         # based on mask, select between the offsets_vec and out of bounds. In this case all 3 operands can be vectors
         selected_index = arith_d.select(mask, offsets_vec, oob_index)
-        elems = list()
 
         if splatted_mask:
             # mask is same for all of them, can just pick the first index
@@ -598,27 +613,24 @@ def _create_vec_read_write(
                 vector_d.store(value, mem, indices=[selected_index])
                 return
 
-        for i in range(elements_per_thread):
-            # mask is not same for all elements, need to unroll
-            this_index = extract(selected_index, i)  # this element
-
-            # Unmasked load, using selected_index
-            singlenumvec_type = VectorType.get([1], vector_type.element_type)
-            if is_read:
-                elem = vector_d.load(singlenumvec_type, mem, indices=[this_index])
-                elem = extract(elem, 0)
-                elems.append(elem)
-            else:
-                elem = extract(value, i)
-                single_num_vector = vector_d.broadcast(singlenumvec_type, elem)
-                vector_d.store(single_num_vector, mem, indices=[this_index])
-
         if is_read:
-            # now make a vector from all the elements loaded
-            return vector_d.from_elements(vector_type, elems)
+            # Load the full vector from the base offset, then zero out OOB
+            # elements with a select. Wrapped "next-row" data for elements
+            # past the fastest-dim boundary is harmless — the select masks
+            # it. If the linearized address itself is past the buffer, the
+            # SRD boundsCheck returns 0.
+            loaded = vector_d.load(vector_type, mem, indices=[scalar_offset_th])
+            passthru = vector_d.broadcast(vector_type, zero)
+            return arith_d.select(mask, loaded, passthru)
 
-        else:  # it was a store, return
-            return
+        for i in range(elements_per_thread):
+            # Writes: mask varies per element, must unroll.
+            this_index = extract(selected_index, i)
+
+            elem = extract(value, i)
+            singlenumvec_type = VectorType.get([1], vector_type.element_type)
+            single_num_vector = vector_d.broadcast(singlenumvec_type, elem)
+            vector_d.store(single_num_vector, mem, indices=[this_index])
 
     else:
         # normal masked load/store
