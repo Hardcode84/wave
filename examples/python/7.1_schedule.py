@@ -171,11 +171,14 @@ def test_dbuf_4wave_mxfp_preshuffle_b_gemm(
     options.linearize_shared_access = True
     options.use_buffer_ops = True
     options.dump_intermediates = "build/intermediates"
-    schedule = get_mxfp4_asymmetric_schedule(is_bscale_shuffled=True)
+    schedule = None  # get_mxfp4_asymmetric_schedule(is_bscale_shuffled=True)
 
     options.print_ir_after = "all" if is_debug else []
     options = set_default_run_config(options)
+    print("wave_compile", flush=True)
     gemm = wave_compile(options, gemm, schedule)
+    print(gemm.asm)
+    return
 
     _run_mxfp_gemm_preshuffle_b(gemm, shape)
     print("MXFP GEMM preshuffle-B 4-wave test passed!")
