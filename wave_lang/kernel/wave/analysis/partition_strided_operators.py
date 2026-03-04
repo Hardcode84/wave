@@ -495,6 +495,26 @@ def _flatten_bounds_to_mask_expr(
     return functools.reduce(sympy.And, conditions)
 
 
+def _decompose_mask_per_lane(mask_expr, ept):
+    """Evaluate a mask expression for each lane, returning per-lane conditions.
+
+    Substitutes ``$IOTA{ept}`` with 0, 1, ..., ept-1 and simplifies each
+    lane's boolean condition.  This flattens nested masks from prior merge
+    levels into a single list.
+    """
+    from ..._support.indexing import IndexingContext, index_symbol
+
+    idxc = IndexingContext.current()
+    iota_sym = index_symbol(f"$IOTA{ept}")
+    per_lane = []
+    for k in range(ept):
+        # .subs() auto-evaluates concrete comparisons (e.g. 5 >= 2 → True),
+        # and And/Or auto-absorb True/False.  Much cheaper than .simplify().
+        cond = mask_expr.subs(iota_sym, sympy.Integer(k))
+        per_lane.append(cond)
+    return per_lane
+
+
 def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept):
     """Build a concatenated sympy mask for a wide read from its sub-reads.
 
@@ -508,45 +528,62 @@ def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept):
     using pure boolean ops so that ``gen_sympy_index`` can lower it without
     the nested-Piecewise ``select_stack`` ordering issue.
 
+    When a sub-read already has a ``precomputed_mask_expr`` from a prior
+    merge, it is decomposed into per-lane conditions first to avoid
+    exponential nesting depth.
+
     Returns a sympy boolean expression or ``None`` when no sub-read has
     bounds.
     """
     from ..._support.indexing import IndexingContext
 
-    from ..._support.indexing import index_symbol
-
-    masks = []
+    # Build per-lane conditions for each sub-read.
+    per_lane = [sympy.true] * wide_ept
+    has_any_mask = False
     for offset, size, custom in sub_reads:
         existing = getattr(custom.fx_node, "precomputed_mask_expr", None)
         if existing is not None:
-            masks.append((offset, size, existing))
+            # Decompose nested mask from prior merge into flat per-lane conds.
+            lane_conds = _decompose_mask_per_lane(existing, size)
+            for k, cond in enumerate(lane_conds):
+                per_lane[offset + k] = cond
+            has_any_mask = True
         else:
-            masks.append(
-                (offset, size, _flatten_bounds_to_mask_expr(custom, symbolic_shape))
-            )
+            mask = _flatten_bounds_to_mask_expr(custom, symbolic_shape)
+            if mask is not None:
+                for k in range(size):
+                    per_lane[offset + k] = mask
+                has_any_mask = True
 
-    if not any(m is not None for _, _, m in masks):
+    if not has_any_mask:
         return None
 
     idxc = IndexingContext.current()
     iota = idxc.iota(wide_ept)
 
+    # Group lanes by condition to minimize terms.
+    from collections import OrderedDict
+
+    cond_to_lanes: OrderedDict[sympy.Basic, list[int]] = OrderedDict()
+    for k, cond in enumerate(per_lane):
+        key = cond
+        if key not in cond_to_lanes:
+            cond_to_lanes[key] = []
+        cond_to_lanes[key].append(k)
+
+    # If all lanes share the same condition, no lane masking needed.
+    if len(cond_to_lanes) == 1:
+        sole_cond = next(iter(cond_to_lanes))
+        return sole_cond if sole_cond is not sympy.true else None
+
     terms = []
-    for offset, size, mask in masks:
-        upper = offset + size
-        lane_cond = sympy.And(
-            sympy.GreaterThan(iota, offset) if offset > 0 else sympy.true,
-            sympy.StrictLessThan(iota, upper),
-        )
-        if mask is not None:
-            # Remap any iota from a previous merge level to the new wide iota.
-            old_iota_sym = index_symbol(f"$IOTA{size}")
-            if mask.has(old_iota_sym):
-                mask = mask.subs(old_iota_sym, iota - offset)
-            bound_cond = mask
+    for cond, lanes in cond_to_lanes.items():
+        if len(lanes) == wide_ept:
+            # Covers all lanes.
+            terms.append(cond)
         else:
-            bound_cond = sympy.true
-        terms.append(sympy.And(lane_cond, bound_cond))
+            lane_cond = functools.reduce(sympy.Or, [sympy.Eq(iota, l) for l in lanes])
+            terms.append(sympy.And(lane_cond, cond))
 
     return functools.reduce(sympy.Or, terms)
 
