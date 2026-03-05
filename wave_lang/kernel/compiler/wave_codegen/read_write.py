@@ -163,6 +163,58 @@ def _get_symbolic_shape(node: fx.Node) -> tuple[IndexExpr]:
     return get_custom(node).type.symbolic_shape
 
 
+def _lower_precomputed_mask(
+    emitter: WaveEmitter,
+    mask_expr: sympy.Expr,
+    elements_per_thread: int,
+    mask_vec_type,
+) -> Value:
+    """Lower a precomputed mask expression to MLIR.
+
+    When the mask contains an ``$IOTA`` symbol (per-lane conditions from
+    merged reads), decomposes it into per-lane scalar conditions and
+    builds the vector with ``vector.insert``.  This avoids the O(N)
+    ``arith.ori`` chain that the generic ``gen_sympy_index`` path
+    produces for ``Or(And(Eq(iota, k), cond_k), ...)`` patterns.
+    """
+    from ..._support.indexing import index_symbol
+
+    iota_sym = index_symbol(f"$IOTA{elements_per_thread}")
+    if not mask_expr.has(iota_sym):
+        # No iota — simple scalar or constant mask.
+        mask = gen_sympy_index(add_emitter_subs(emitter), mask_expr)
+        if mask.type != mask_vec_type:
+            mask = vector_d.broadcast(mask_vec_type, mask)
+        return mask
+
+    # Per-lane mask: substitute iota with each lane index and build
+    # the vector with vector.insert instead of an ori chain.
+    dynamics = add_emitter_subs(emitter)
+    i1_type = IntegerType.get_signless(1)
+    false_attr = IntegerAttr.get(i1_type, 0)
+    mask = arith_d.constant(
+        mask_vec_type,
+        DenseElementsAttr.get_splat(mask_vec_type, false_attr),
+    )
+    for k in range(elements_per_thread):
+        lane_cond = mask_expr.subs(iota_sym, sympy.Integer(k))
+        lane_val = gen_sympy_index(dynamics, lane_cond)
+        if hasattr(lane_val.type, "element_type"):
+            # Extract scalar from vector<1xi1>.
+            lane_val = vector_d.extract(
+                lane_val,
+                static_position=[0],
+                dynamic_position=[],
+            )
+        mask = vector_d.insert(
+            lane_val,
+            mask,
+            static_position=[k],
+            dynamic_position=[],
+        )
+    return mask
+
+
 def _build_mask(
     emitter: WaveEmitter,
     index: dict[IndexExpr, IndexExpr],
@@ -716,12 +768,15 @@ def handle_read(emitter: WaveEmitter, node: fx.Node):
 
     precomputed_mask_expr = getattr(node, "precomputed_mask_expr", None)
     if precomputed_mask_expr is not None and not buffer_ops_enabled:
-        mask = gen_sympy_index(add_emitter_subs(emitter), precomputed_mask_expr)
         mask_vec_type = VectorType.get(
             [elements_per_thread], IntegerType.get_signless(1)
         )
-        if mask.type != mask_vec_type:
-            mask = vector_d.broadcast(mask_vec_type, mask)
+        mask = _lower_precomputed_mask(
+            emitter,
+            precomputed_mask_expr,
+            elements_per_thread,
+            mask_vec_type,
+        )
     elif mapping:
         transformed_index = transform_index_on_mapping(
             mapping, input_shape, index, is_read=True

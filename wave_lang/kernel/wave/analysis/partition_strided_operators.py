@@ -450,6 +450,8 @@ def _get_physical_start(
 def _flatten_bounds_to_mask_expr(
     custom: Read,
     symbolic_shape: tuple,
+    iota_dim=None,
+    iota_sym=None,
 ):
     """Pre-compute a read's bounds check as a flat sympy boolean.
 
@@ -459,6 +461,9 @@ def _flatten_bounds_to_mask_expr(
     original logical index is used.  Returns a sympy boolean expression
     (eg. And(idx < bound, ...)) or None if the read has no bounds.
 
+    When *iota_dim* and *iota_sym* are provided, the start index for
+    *iota_dim* is offset by *iota_sym*, producing a parametric condition
+    that varies per-lane (e.g. ``base + iota < bound``).
     """
     if not custom.bounds:
         return None
@@ -483,10 +488,10 @@ def _flatten_bounds_to_mask_expr(
         start = (
             index[dim].start if isinstance(index[dim], IndexSequence) else index[dim]
         )
-        if isinstance(start, int):
-            start = sympy.Integer(start)
-        if isinstance(bound, int):
-            bound = sympy.Integer(bound)
+        start = sympy.sympify(start)
+        if dim == iota_dim and iota_sym is not None:
+            start = start + iota_sym
+        bound = sympy.sympify(bound)
         conditions.append(sympy.StrictLessThan(start, bound))
 
     if not conditions:
@@ -515,7 +520,93 @@ def _decompose_mask_per_lane(mask_expr, ept):
     return per_lane
 
 
-def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept):
+def _lanes_to_range_check(iota, lanes: list[int]) -> sympy.Basic:
+    """Convert a list of lane indices to a compact range-check expression.
+
+    Contiguous runs become ``And(iota >= lo, iota <= hi)`` (or just
+    ``iota < hi+1`` when ``lo == 0``).  Much cheaper than per-lane
+    ``Or(Eq(iota, 0), Eq(iota, 1), ...)``.
+    """
+    # Split into contiguous runs.
+    runs: list[tuple[int, int]] = []
+    for l in sorted(lanes):
+        if runs and l == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], l)
+        else:
+            runs.append((l, l))
+
+    parts = []
+    for lo, hi in runs:
+        if lo == hi:
+            parts.append(sympy.Eq(iota, lo))
+        elif lo == 0:
+            parts.append(iota <= hi)
+        else:
+            parts.append(sympy.And(iota >= lo, iota <= hi))
+    return functools.reduce(sympy.Or, parts)
+
+
+def _try_parametric_mask(sub_reads, symbolic_shape, wide_ept, merge_dim):
+    """Try to build a parametric mask using iota instead of per-lane selectors.
+
+    Instead of ``Or(And(Eq(iota, 0), c0), And(Eq(iota, 1), c1), ...)``,
+    express the mask as ``f(iota) < bound`` — a single vector comparison
+    instead of N scalar comparisons + N ori ops.
+
+    Returns a sympy expression, ``sympy.true`` (no bounds), or ``None``
+    (parameterization failed, caller should fall back to per-lane).
+    """
+    from ..._support.indexing import IndexingContext, index_symbol
+
+    idxc = IndexingContext.current()
+    iota_wide = idxc.iota(wide_ept)
+
+    first_offset, first_size, first_custom = sub_reads[0]
+    first_precomputed = getattr(first_custom.fx_node, "precomputed_mask_expr", None)
+
+    if first_precomputed is not None:
+        # Multi-level merge: remap first sub-read's iota to wide iota.
+        sub_iota = index_symbol(f"$IOTA{first_size}")
+        base_mask = first_precomputed.subs(sub_iota, iota_wide - first_offset)
+    else:
+        # First level: compute parametric condition with iota in merge dim.
+        base_mask = _flatten_bounds_to_mask_expr(
+            first_custom,
+            symbolic_shape,
+            iota_dim=merge_dim,
+            iota_sym=iota_wide,
+        )
+
+    if base_mask is None:
+        # First sub-read has no bounds. Verify all others are the same.
+        for offset, size, custom in sub_reads[1:]:
+            precomputed = getattr(custom.fx_node, "precomputed_mask_expr", None)
+            if precomputed is not None:
+                return None
+            if _flatten_bounds_to_mask_expr(custom, symbolic_shape) is not None:
+                return None
+        return sympy.true
+
+    # Verify all other sub-reads produce the same parametric mask.
+    for offset, size, custom in sub_reads[1:]:
+        precomputed = getattr(custom.fx_node, "precomputed_mask_expr", None)
+        if precomputed is not None:
+            sub_iota = index_symbol(f"$IOTA{size}")
+            remapped = precomputed.subs(sub_iota, iota_wide - offset)
+        else:
+            # Substitute iota=offset in base_mask; should match direct condition.
+            direct = _flatten_bounds_to_mask_expr(custom, symbolic_shape)
+            expected = base_mask.subs(iota_wide, sympy.Integer(offset))
+            if direct != expected:
+                return None
+            continue
+        if remapped != base_mask:
+            return None
+
+    return base_mask
+
+
+def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept, merge_dim=None):
     """Build a concatenated sympy mask for a wide read from its sub-reads.
 
     Each entry in *sub_reads* is ``(offset, size, orig_custom)`` where
@@ -537,7 +628,18 @@ def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept):
     """
     from ..._support.indexing import IndexingContext
 
-    # Build per-lane conditions for each sub-read.
+    # Try parametric approach first: express mask as f(iota) < bound.
+    if merge_dim is not None:
+        result = _try_parametric_mask(
+            sub_reads,
+            symbolic_shape,
+            wide_ept,
+            merge_dim,
+        )
+        if result is not None:
+            return result if result is not sympy.true else None
+
+    # Fall back to per-lane approach.
     per_lane = [sympy.true] * wide_ept
     has_any_mask = False
     for offset, size, custom in sub_reads:
@@ -582,7 +684,7 @@ def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept):
             # Covers all lanes.
             terms.append(cond)
         else:
-            lane_cond = functools.reduce(sympy.Or, [sympy.Eq(iota, l) for l in lanes])
+            lane_cond = _lanes_to_range_check(iota, lanes)
             terms.append(sympy.And(lane_cond, cond))
 
     return functools.reduce(sympy.Or, terms)
@@ -689,6 +791,7 @@ def _do_merge(
         [(0, ept, lo_custom), (ept, ept, hi_custom)],
         symbolic_shape,
         new_ept,
+        merge_dim=merge_dim,
     )
     with lo_custom.graph.inserting_before(lo_node):
         new_index = {
