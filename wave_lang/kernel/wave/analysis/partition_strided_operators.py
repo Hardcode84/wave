@@ -469,13 +469,16 @@ def _extract_induction_floor(term):
 
 
 def _lift_floordiv_from_bound(condition):
-    """Rewrite ``base + floor(num/div) < bound`` → ``num < div*(bound - base)``.
+    """Rewrite ``base + floor(num/div) < bound`` → ``ind < div*(bound-base) - inv``.
 
-    This algebraic identity (valid for positive div, integer bound-base)
-    removes the ``floor`` from the comparison, turning a non-linear
-    loop-dependent expression into a linear one.  LICM can then hoist
-    ``div*(bound - base)`` out of the loop, leaving only a cheap multiply
-    + compare per iteration.
+    Applies two algebraic transforms:
+
+    1. ``floor(x/c) < d  ⟺  x < c*d`` (valid for positive c, integer d)
+       removes the ``floor``, unblocking LICM.
+
+    2. Isolates induction-dependent terms on the LHS so the RHS is
+       entirely loop-invariant.  MLIR CSE can then share the single
+       ``ARG_K * stride`` computation across all vector lanes.
 
     Only applies when the LHS contains exactly one ``floor(num/div)`` term
     whose numerator contains a loop induction symbol (``$ARG*``).
@@ -500,8 +503,20 @@ def _lift_floordiv_from_bound(condition):
 
     idx, (num, den) = found
     base = lhs - terms[idx]
-    # floor(num/den) < (rhs - base)  ⟺  num < den * (rhs - base).
-    return sympy.StrictLessThan(num, den * (rhs - base))
+    threshold = den * (rhs - base)
+
+    # Isolate induction terms on the LHS so the RHS is loop-invariant.
+    # num = ind_part + inv_part  →  ind_part < threshold - inv_part.
+    # This lets MLIR CSE share the single ind_part across all lanes.
+    if isinstance(num, sympy.Add):
+        ind = [t for t in num.args if _has_induction_symbol(t)]
+        inv = [t for t in num.args if not _has_induction_symbol(t)]
+        if ind and inv:
+            return sympy.StrictLessThan(
+                sympy.Add(*ind), threshold - sympy.Add(*inv)
+            )
+
+    return sympy.StrictLessThan(num, threshold)
 
 
 def _flatten_bounds_to_mask_expr(
