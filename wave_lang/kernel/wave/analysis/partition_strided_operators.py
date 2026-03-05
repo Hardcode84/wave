@@ -421,7 +421,8 @@ def merge_contiguous_reads(
     physical flat offset starts differ by exactly ept are merged.
     """
     hw_constraint = get_hardware_constraint(constraints)
-    while _merge_contiguous_reads_once(trace, hw_constraint):
+    fwd, _ = get_divisibility_subs(constraints)
+    while _merge_contiguous_reads_once(trace, hw_constraint, divisibility_fwd=fwd):
         pass
 
 
@@ -450,9 +451,7 @@ def _get_physical_start(
 
 def _has_induction_symbol(expr) -> bool:
     """Check if a sympy expression contains a loop induction symbol ($ARG*)."""
-    return any(
-        s.name.startswith(_INDUCTION_SYMBOL_PREFIX) for s in expr.free_symbols
-    )
+    return any(s.name.startswith(_INDUCTION_SYMBOL_PREFIX) for s in expr.free_symbols)
 
 
 def _extract_induction_floor(term):
@@ -512,9 +511,7 @@ def _lift_floordiv_from_bound(condition):
         ind = [t for t in num.args if _has_induction_symbol(t)]
         inv = [t for t in num.args if not _has_induction_symbol(t)]
         if ind and inv:
-            return sympy.StrictLessThan(
-                sympy.Add(*ind), threshold - sympy.Add(*inv)
-            )
+            return sympy.StrictLessThan(sympy.Add(*ind), threshold - sympy.Add(*inv))
 
     return sympy.StrictLessThan(num, threshold)
 
@@ -679,7 +676,227 @@ def _try_parametric_mask(sub_reads, symbolic_shape, wide_ept, merge_dim):
     return base_mask
 
 
-def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept, merge_dim=None):
+def _probe_is_zero(expr, min_successes=20):
+    """Check if *expr* is identically zero via numeric probing.
+
+    Unlike ``_numeric_eval_constant``, this function tolerates occasional
+    ``ZeroDivisionError`` probes (which arise when divisibility-substituted
+    symbols like ``_K_div_256`` hit 0 in the probe pool).  Probes that
+    cause errors are skipped; the expression is deemed zero only when at
+    least *min_successes* probes all return 0.
+    """
+    from ..utils.symbol_utils import (
+        _compile_evaluator,
+        _PROBE_POOL,
+        _STRIDES,
+        _BAD_ATOMS,
+    )
+
+    if isinstance(expr, (int, sympy.Integer)):
+        return expr == 0
+    if not isinstance(expr, sympy.Basic):
+        return False
+    if expr.is_number:
+        try:
+            return int(expr) == 0
+        except (TypeError, ValueError):
+            return False
+
+    # Piecewise .subs() and .atoms() are extremely slow on nested
+    # Piecewise expressions.  Use .replace() to swap them with fresh
+    # symbols in a single bottom-up traversal.
+    _pw_counter = [0]
+    _pw_cache: dict[sympy.Piecewise, sympy.Symbol] = {}
+
+    def _pw_replacer(pw):
+        if pw not in _pw_cache:
+            s = sympy.Symbol(f"_PW{_pw_counter[0]}", integer=True, nonnegative=True)
+            _pw_counter[0] += 1
+            _pw_cache[pw] = s
+        return _pw_cache[pw]
+
+    if isinstance(expr, sympy.Basic) and expr.has(sympy.Piecewise):
+        expr = expr.replace(lambda e: isinstance(e, sympy.Piecewise), _pw_replacer)
+        if isinstance(expr, (int, sympy.Integer)):
+            return expr == 0
+
+    try:
+        free, evaluator = _compile_evaluator(expr)
+    except Exception:
+        return False
+    if not free:
+        if expr.has(*_BAD_ATOMS):
+            return False
+        try:
+            return int(expr) == 0
+        except (TypeError, ValueError):
+            return False
+
+    n_probes = len(_PROBE_POOL)
+    n_strides = len(_STRIDES)
+    strides = [_STRIDES[i % n_strides] for i in range(len(free))]
+    successes = 0
+    for trial in range(48):
+        args = [
+            _PROBE_POOL[(trial * strides[i] + i) % n_probes] for i in range(len(free))
+        ]
+        if evaluator is not None:
+            try:
+                result = evaluator(*args)
+            except (ZeroDivisionError, ValueError, OverflowError, TypeError):
+                continue
+            except NameError:
+                evaluator = None
+            else:
+                if isinstance(result, bool) or (
+                    isinstance(result, float) and not result.is_integer()
+                ):
+                    return False
+                if int(result) != 0:
+                    return False
+                successes += 1
+                continue
+        # Fallback to sympy .subs().
+        subs = dict(zip(free, args))
+        result = expr.subs(subs)
+        if result.free_symbols or result.has(*_BAD_ATOMS):
+            continue
+        try:
+            if int(result) != 0:
+                return False
+        except (TypeError, ValueError):
+            continue
+        successes += 1
+
+    return successes >= min_successes
+
+
+def _probe_conditions_agree(lhs_a, rhs_a, lhs_b, rhs_b, min_successes=20):
+    """Check that ``lhs_a < rhs_a`` and ``lhs_b < rhs_b`` always agree.
+
+    Evaluates both comparisons at diverse probe points and returns True
+    only when they produce the same boolean result for at least
+    *min_successes* probes (skipping probes that cause errors).
+    """
+    from ..utils.symbol_utils import _PROBE_POOL, _STRIDES
+
+    all_exprs = [lhs_a, rhs_a, lhs_b, rhs_b]
+    # Replace Piecewise nodes with fresh symbols for fast lambdify.
+    pw_cache: dict = {}
+    pw_counter = [0]
+    cleaned = []
+    for expr in all_exprs:
+        if isinstance(expr, sympy.Basic) and expr.has(sympy.Piecewise):
+
+            def _pw_rep(pw, _cache=pw_cache, _cnt=pw_counter):
+                if pw not in _cache:
+                    s = sympy.Symbol(f"_PW{_cnt[0]}", integer=True, nonnegative=True)
+                    _cnt[0] += 1
+                    _cache[pw] = s
+                return _cache[pw]
+
+            expr = expr.replace(lambda e: isinstance(e, sympy.Piecewise), _pw_rep)
+        cleaned.append(expr)
+    lhs_a, rhs_a, lhs_b, rhs_b = cleaned
+
+    # Collect free symbols from all four expressions.
+    free = set()
+    for e in cleaned:
+        if isinstance(e, sympy.Basic):
+            free |= e.free_symbols
+    free = tuple(sorted(free, key=lambda s: s.name))
+    if not free:
+        try:
+            return (int(lhs_a) < int(rhs_a)) == (int(lhs_b) < int(rhs_b))
+        except (TypeError, ValueError):
+            return False
+
+    # Compile all four expressions.
+    from ..utils.symbol_utils import _LAMBDIFY_MODULES
+
+    try:
+        f_la = sympy.lambdify(free, lhs_a, modules=[_LAMBDIFY_MODULES])
+        f_ra = sympy.lambdify(free, rhs_a, modules=[_LAMBDIFY_MODULES])
+        f_lb = sympy.lambdify(free, lhs_b, modules=[_LAMBDIFY_MODULES])
+        f_rb = sympy.lambdify(free, rhs_b, modules=[_LAMBDIFY_MODULES])
+    except Exception:
+        return False
+
+    n_probes = len(_PROBE_POOL)
+    n_strides = len(_STRIDES)
+    strides = [_STRIDES[i % n_strides] for i in range(len(free))]
+    successes = 0
+    for trial in range(48):
+        args = [
+            _PROBE_POOL[(trial * strides[i] + i) % n_probes] for i in range(len(free))
+        ]
+        try:
+            va = f_la(*args) < f_ra(*args)
+            vb = f_lb(*args) < f_rb(*args)
+        except (ZeroDivisionError, ValueError, OverflowError, TypeError):
+            continue
+        if va != vb:
+            return False
+        successes += 1
+
+    return successes >= min_successes
+
+
+def _try_collapse_uniform_conditions(cond_to_lanes, divisibility_fwd=None):
+    """Collapse per-lane conditions that are numerically identical.
+
+    Non-linear preshuffle index mappings produce per-lane bounds checks
+    that are symbolically distinct but provably equivalent at runtime
+    (e.g. ``floor(offset_0/(K/2)) < N`` vs ``floor(offset_1/(K/2)) < N``
+    where offset_0 and offset_1 always land in the same K/2 block).
+    When this is the case, a single scalar condition suffices and the
+    per-lane ``vector.from_elements`` is replaced by a scalar comparison
+    + broadcast — eliminating N-1 redundant comparisons from the loop body.
+
+    *divisibility_fwd* are forward substitutions from divisibility
+    assumptions (e.g. ``K → 256*K'``).  They let ``floor``/``Mod`` nodes
+    simplify under the assumption that K is a multiple of 256, which is
+    required for the expressions to actually be equal.
+
+    Returns a representative condition, or None if collapse is not possible.
+    """
+    conditions = list(cond_to_lanes.keys())
+    if len(conditions) <= 1:
+        return None
+
+    # All conditions must be simple comparisons.
+    parts = []
+    for cond in conditions:
+        if not isinstance(cond, sympy.StrictLessThan):
+            return None
+        parts.append(cond.args)
+
+    # Compare truth values directly.  Two conditions ``x < a`` and
+    # ``y < b`` are equivalent when they agree at every probe point,
+    # even if ``a != b``.  For example, when ``x`` is always a multiple
+    # of 2048 and ``|a - b| < 2048``, a threshold difference of 1 never
+    # matters.
+    #
+    # For each condition pair, substitute divisibility assumptions into
+    # both LHS and RHS, then probe whether ``(lhs_a < rhs_a)`` agrees
+    # with ``(lhs_b < rhs_b)`` across many probe points.
+    ref_lhs, ref_rhs = parts[0]
+    if divisibility_fwd:
+        ref_lhs = safe_subs(ref_lhs, divisibility_fwd)
+        ref_rhs = safe_subs(ref_rhs, divisibility_fwd)
+    for lhs, rhs in parts[1:]:
+        if divisibility_fwd:
+            lhs = safe_subs(lhs, divisibility_fwd)
+            rhs = safe_subs(rhs, divisibility_fwd)
+        if not _probe_conditions_agree(ref_lhs, ref_rhs, lhs, rhs):
+            return None
+
+    return conditions[0]
+
+
+def _build_wide_mask_expr(
+    sub_reads, symbolic_shape, wide_ept, merge_dim=None, divisibility_fwd=None
+):
     """Build a concatenated sympy mask for a wide read from its sub-reads.
 
     Each entry in *sub_reads* is ``(offset, size, orig_custom)`` where
@@ -750,6 +967,12 @@ def _build_wide_mask_expr(sub_reads, symbolic_shape, wide_ept, merge_dim=None):
     if len(cond_to_lanes) == 1:
         sole_cond = next(iter(cond_to_lanes))
         return sole_cond if sole_cond is not sympy.true else None
+
+    # Try to collapse symbolically-distinct but numerically-equivalent
+    # conditions into a single scalar condition (no per-lane iota needed).
+    collapsed = _try_collapse_uniform_conditions(cond_to_lanes, divisibility_fwd)
+    if collapsed is not None:
+        return collapsed if collapsed is not sympy.true else None
 
     terms = []
     for cond, lanes in cond_to_lanes.items():
@@ -851,7 +1074,15 @@ def _resolve_symbolic_diff(raw_diff, has_complex_mapping, expected_vals=None):
 
 
 def _do_merge(
-    lo_i, hi_i, merge_dim, read_infos, ept, symbolic_dims, symbolic_shape, hw_constraint
+    lo_i,
+    hi_i,
+    merge_dim,
+    read_infos,
+    ept,
+    symbolic_dims,
+    symbolic_shape,
+    hw_constraint,
+    divisibility_fwd=None,
 ):
     """Emit a wide read merging reads at lo_i and hi_i. Returns True on success."""
     _, lo_phys, lo_custom, lo_node = read_infos[lo_i]
@@ -865,6 +1096,7 @@ def _do_merge(
         symbolic_shape,
         new_ept,
         merge_dim=merge_dim,
+        divisibility_fwd=divisibility_fwd,
     )
     with lo_custom.graph.inserting_before(lo_node):
         new_index = {
@@ -921,7 +1153,9 @@ def _eval_expr(expr, probe_map):
     return int(expr.xreplace(probe_map))
 
 
-def _pairwise_merge(read_infos, ept, symbolic_dims, symbolic_shape, hw_constraint):
+def _pairwise_merge(
+    read_infos, ept, symbolic_dims, symbolic_shape, hw_constraint, divisibility_fwd=None
+):
     """Merge pairs of reads whose flat offsets differ by exactly ``ept``.
 
     Returns ``(merged_indices, did_merge)`` where *merged_indices* is
@@ -1037,6 +1271,7 @@ def _pairwise_merge(read_infos, ept, symbolic_dims, symbolic_shape, hw_constrain
                     symbolic_dims,
                     symbolic_shape,
                     hw_constraint,
+                    divisibility_fwd=divisibility_fwd,
                 ):
                     merged.update({i, j})
                     did_merge = True
@@ -1049,7 +1284,13 @@ def _pairwise_merge(read_infos, ept, symbolic_dims, symbolic_shape, hw_constrain
 
 
 def _multiway_coalesce(
-    read_infos, merged, reads, symbolic_dims, symbolic_shape, hw_constraint
+    read_infos,
+    merged,
+    reads,
+    symbolic_dims,
+    symbolic_shape,
+    hw_constraint,
+    divisibility_fwd=None,
 ):
     """Coalesce unmerged ept==1 reads whose flat offsets fall in an aligned window.
 
@@ -1149,6 +1390,7 @@ def _multiway_coalesce(
             [(byte_pos, 1, g_custom) for _, _, g_custom, byte_pos, _ in group],
             symbolic_shape,
             wide_ept,
+            divisibility_fwd=divisibility_fwd,
         )
         with get_custom(earliest_node).graph.inserting_before(earliest_node):
             wide_index = {}
@@ -1180,7 +1422,9 @@ def _multiway_coalesce(
     return coalesced_any
 
 
-def _merge_contiguous_reads_once(trace: CapturedTrace, hw_constraint) -> bool:
+def _merge_contiguous_reads_once(
+    trace: CapturedTrace, hw_constraint, divisibility_fwd=None
+) -> bool:
     """Single merge pass: merge reads that access nearby physical memory.
 
     Two strategies are applied per (memory, ept) group:
@@ -1225,31 +1469,27 @@ def _merge_contiguous_reads_once(trace: CapturedTrace, hw_constraint) -> bool:
             )
             read_infos.append((flat_offset, phys_start, custom, node))
 
-        import time as _time
-
-        print(
-            f"[DEBUG merge] mem={memory.fx_node.name} ept={ept} region={_region} n_reads={len(read_infos)}",
-            flush=True,
-        )
-        _t0 = _time.time()
         merged, did_merge = _pairwise_merge(
-            read_infos, ept, symbolic_dims, symbolic_shape, hw_constraint
-        )
-        print(
-            f"[DEBUG merge] _pairwise_merge {_time.time()-_t0:.3f}s merged={len(merged)} did_merge={did_merge}",
-            flush=True,
+            read_infos,
+            ept,
+            symbolic_dims,
+            symbolic_shape,
+            hw_constraint,
+            divisibility_fwd=divisibility_fwd,
         )
         merged_any |= did_merge
 
         # Only ept==1 (byte) reads need multi-way coalescing; wider reads
         # are already handled by the pairwise merge above.
         if ept == 1 and len(read_infos) >= 2:
-            _t0 = _time.time()
             merged_any |= _multiway_coalesce(
-                read_infos, merged, reads, symbolic_dims, symbolic_shape, hw_constraint
-            )
-            print(
-                f"[DEBUG merge] _multiway_coalesce {_time.time()-_t0:.3f}s", flush=True
+                read_infos,
+                merged,
+                reads,
+                symbolic_dims,
+                symbolic_shape,
+                hw_constraint,
+                divisibility_fwd=divisibility_fwd,
             )
 
     return merged_any
