@@ -44,6 +44,7 @@ from ..utils.mma_utils import (
     simplify_index,
 )
 from ..utils.symbol_utils import (
+    _INDUCTION_SYMBOL_PREFIX,
     _numeric_eval_constant,
     safe_subs,
     simplify as sym_simplify,
@@ -447,6 +448,62 @@ def _get_physical_start(
     return {dim: custom.index[dim].start for dim in symbolic_dims}
 
 
+def _has_induction_symbol(expr) -> bool:
+    """Check if a sympy expression contains a loop induction symbol ($ARG*)."""
+    return any(
+        s.name.startswith(_INDUCTION_SYMBOL_PREFIX) for s in expr.free_symbols
+    )
+
+
+def _extract_induction_floor(term):
+    """Extract (numerator, denominator) from ``floor(num/den)`` when the
+    numerator contains an induction symbol.  Returns None otherwise."""
+    if not isinstance(term, sympy.floor):
+        return None
+    if not _has_induction_symbol(term):
+        return None
+    num, den = term.args[0].as_numer_denom()
+    if den == 1:
+        return None
+    return num, den
+
+
+def _lift_floordiv_from_bound(condition):
+    """Rewrite ``base + floor(num/div) < bound`` → ``num < div*(bound - base)``.
+
+    This algebraic identity (valid for positive div, integer bound-base)
+    removes the ``floor`` from the comparison, turning a non-linear
+    loop-dependent expression into a linear one.  LICM can then hoist
+    ``div*(bound - base)`` out of the loop, leaving only a cheap multiply
+    + compare per iteration.
+
+    Only applies when the LHS contains exactly one ``floor(num/div)`` term
+    whose numerator contains a loop induction symbol (``$ARG*``).
+    """
+    if not isinstance(condition, sympy.StrictLessThan):
+        return condition
+
+    lhs, rhs = condition.args
+
+    # Find the unique floor(num/div) term with an induction symbol.
+    terms = lhs.as_ordered_terms() if isinstance(lhs, sympy.Add) else [lhs]
+    found = None
+    for i, term in enumerate(terms):
+        info = _extract_induction_floor(term)
+        if info is not None:
+            if found is not None:
+                return condition  # Multiple induction floors — bail.
+            found = (i, info)
+
+    if found is None:
+        return condition
+
+    idx, (num, den) = found
+    base = lhs - terms[idx]
+    # floor(num/den) < (rhs - base)  ⟺  num < den * (rhs - base).
+    return sympy.StrictLessThan(num, den * (rhs - base))
+
+
 def _flatten_bounds_to_mask_expr(
     custom: Read,
     symbolic_shape: tuple,
@@ -492,7 +549,8 @@ def _flatten_bounds_to_mask_expr(
         if dim == iota_dim and iota_sym is not None:
             start = start + iota_sym
         bound = sympy.sympify(bound)
-        conditions.append(sympy.StrictLessThan(start, bound))
+        cond = sympy.StrictLessThan(start, bound)
+        conditions.append(_lift_floordiv_from_bound(cond))
 
     if not conditions:
         return None
