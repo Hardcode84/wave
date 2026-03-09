@@ -311,89 +311,123 @@ IfOp RegionBuilder::buildIfFromSCFIf(scf::IfOp ifOp) {
         V_READFIRSTLANE_B32::create(builder, loc, sregType, conditionValue);
   }
 
-  // Infer result types by peeking at what the then region will yield
-  // This requires translating yield operands first to get their mapped types
-  SmallVector<Type> resultTypes;
-  auto thenYield =
-      cast<scf::YieldOp>(ifOp.getThenRegion().front().getTerminator());
-  for (Value yieldVal : thenYield.getOperands()) {
-    // If already mapped, use its type
-    if (auto mapped = ctx.getMapper().getMapped(yieldVal)) {
-      resultTypes.push_back(mapped->getType());
-    } else {
-      // Use a default vreg type if not yet mapped
-      // (will be set properly during body translation)
-      resultTypes.push_back(ctx.createVRegType());
-    }
-  }
-
-  // Create if operation with inferred result types
+  // Collect mapped yield values from the SCF regions so we can reconcile
+  // their types before creating the waveasm.if.  Both branches must yield
+  // compatible register kinds (e.g. both SGPR or both VGPR).
   bool hasElse = !ifOp.getElseRegion().empty();
+
+  // Helper: translate a region body and collect its mapped yield values.
+  auto translateRegionYields =
+      [&](Region &scfRegion, Block &wasmBlock,
+          SmallVectorImpl<Value> &yieldVals) -> LogicalResult {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToStart(&wasmBlock);
+
+    for (Operation &op : scfRegion.front().without_terminator())
+      if (failed(translateOp(&op)))
+        return failure();
+
+    auto scfYield = cast<scf::YieldOp>(scfRegion.front().getTerminator());
+    for (Value res : scfYield.getResults()) {
+      auto mapped = ctx.getMapper().getMapped(res);
+      if (!mapped) {
+        scfYield.emitError("yield result not mapped");
+        return failure();
+      }
+      yieldVals.push_back(*mapped);
+    }
+    return success();
+  };
+
+  // Use placeholder result types; we fix them up after translating both
+  // branches and reconciling yield types.
+  auto scfThenYield =
+      cast<scf::YieldOp>(ifOp.getThenRegion().front().getTerminator());
+  SmallVector<Type> resultTypes(scfThenYield.getNumOperands(),
+                                ctx.createVRegType());
   auto waveIfOp =
       IfOp::create(builder, loc, resultTypes, conditionValue, hasElse);
 
-  // Translate then region
+  // Translate then region.
+  SmallVector<Value> thenYieldVals;
+  if (failed(translateRegionYields(ifOp.getThenRegion(),
+                                   waveIfOp.getThenBlock(), thenYieldVals))) {
+    ifOp.emitError("failed to translate then region");
+    return nullptr;
+  }
+
+  // Translate else region.
+  SmallVector<Value> elseYieldVals;
+  if (hasElse) {
+    if (failed(translateRegionYields(
+            ifOp.getElseRegion(), *waveIfOp.getElseBlock(), elseYieldVals))) {
+      ifOp.emitError("failed to translate else region");
+      return nullptr;
+    }
+  }
+
+  // Reconcile yield types so both branches produce compatible register kinds.
+  // The then branch typically yields ARegs (MFMA accumulators) or VGPRs while
+  // the else branch yields immediates (zero constants for the OOB/skip path).
+  // Promote each mismatched value to match the other branch's type.
+  if (hasElse) {
+    // Helper: convert |val| to |targetType|, inserting at the end of |block|.
+    // V_MOV_B32 accepts Imm/VReg sources and can produce VReg or AReg output.
+    auto promoteToType = [&](Value &val, Type targetType, Block &block) {
+      if (typesCompatible(val.getType(), targetType))
+        return;
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(&block);
+      if (isa<ImmType>(val.getType())) {
+        // Imm -> VReg/AReg via V_MOV_B32.
+        val = V_MOV_B32::create(builder, loc, targetType, val);
+      } else if (isSGPRType(val.getType())) {
+        // SGPR -> VReg via V_ADD_U32(zero, sgpr), then AReg if needed.
+        auto vregType = ctx.createVRegType();
+        auto zeroImm = ctx.createImmType(0);
+        auto zeroConst = ConstantOp::create(builder, loc, zeroImm, 0);
+        Value zeroVgpr = V_MOV_B32::create(builder, loc, vregType, zeroConst);
+        val = V_ADD_U32::create(builder, loc, vregType, zeroVgpr, val);
+        if (isAGPRType(targetType))
+          val = V_MOV_B32::create(builder, loc, targetType, val);
+      } else if (isVGPRType(val.getType()) && isAGPRType(targetType)) {
+        val = V_MOV_B32::create(builder, loc, targetType, val);
+      } else if (isAGPRType(val.getType()) && isVGPRType(targetType)) {
+        val = V_MOV_B32::create(builder, loc, targetType, val);
+      }
+    };
+
+    for (auto [thenVal, elseVal] : llvm::zip(thenYieldVals, elseYieldVals)) {
+      if (typesCompatible(thenVal.getType(), elseVal.getType()))
+        continue;
+      // Use the then-branch type as the target since it carries the
+      // computation result (MFMAs, etc.).
+      Type target = thenVal.getType();
+      promoteToType(elseVal, target, *waveIfOp.getElseBlock());
+      promoteToType(thenVal, target, waveIfOp.getThenBlock());
+    }
+  }
+
+  // Determine final result types from the (now-reconciled) then yields.
+  for (auto [i, val] : llvm::enumerate(thenYieldVals))
+    waveIfOp.getResult(i).setType(val.getType());
+
+  // Create yield ops in each branch.
   {
     OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(&waveIfOp.getThenBlock());
-
-    for (Operation &op : ifOp.getThenRegion().front().without_terminator()) {
-      if (failed(translateOp(&op))) {
-        ifOp.emitError("failed to translate then region");
-        return nullptr;
-      }
-    }
-
-    // Get yield values and create waveasm.yield
-    auto scfYield =
-        cast<scf::YieldOp>(ifOp.getThenRegion().front().getTerminator());
-
-    SmallVector<Value> yieldVals;
-    for (Value res : scfYield.getResults()) {
-      if (auto mapped = ctx.getMapper().getMapped(res)) {
-        yieldVals.push_back(*mapped);
-      } else {
-        scfYield.emitError("yield result not mapped");
-        return nullptr;
-      }
-    }
-
-    YieldOp::create(builder, loc, yieldVals);
+    builder.setInsertionPointToEnd(&waveIfOp.getThenBlock());
+    YieldOp::create(builder, loc, thenYieldVals);
   }
-
-  // Translate else region if present
   if (hasElse) {
     OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPointToStart(waveIfOp.getElseBlock());
-
-    for (Operation &op : ifOp.getElseRegion().front().without_terminator()) {
-      if (failed(translateOp(&op))) {
-        ifOp.emitError("failed to translate else region");
-        return nullptr;
-      }
-    }
-
-    auto scfYield =
-        cast<scf::YieldOp>(ifOp.getElseRegion().front().getTerminator());
-
-    SmallVector<Value> yieldVals;
-    for (Value res : scfYield.getResults()) {
-      if (auto mapped = ctx.getMapper().getMapped(res)) {
-        yieldVals.push_back(*mapped);
-      } else {
-        scfYield.emitError("yield result not mapped");
-        return nullptr;
-      }
-    }
-
-    YieldOp::create(builder, loc, yieldVals);
+    builder.setInsertionPointToEnd(waveIfOp.getElseBlock());
+    YieldOp::create(builder, loc, elseYieldVals);
   }
 
-  // Map if results
+  // Map if results.
   for (auto [ifRes, waveRes] :
-       llvm::zip(ifOp.getResults(), waveIfOp.getResults())) {
+       llvm::zip(ifOp.getResults(), waveIfOp.getResults()))
     ctx.getMapper().mapValue(ifRes, waveRes);
-  }
 
   return waveIfOp;
 }
