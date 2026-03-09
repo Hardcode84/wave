@@ -351,7 +351,7 @@ def test_dbuf_4wave_mxfp_preshuffle_b_reordered_gemm_cpp(
     gemm, options = get_tagged_mxfp4_gemm_preshuffle_b(
         shape, block, wave_shape=(1, 4), reorder_workgroups=True, group_size_n=32
     )
-    dynamic_symbols = [tkl.sym.M, tkl.sym.N, tkl.sym.K]
+    dynamic_symbols = [tkl.sym.M, tkl.sym.N]
     for sym in dynamic_symbols:
         del options.subs[sym]
     options.dynamic_symbols = dynamic_symbols
@@ -359,6 +359,7 @@ def test_dbuf_4wave_mxfp_preshuffle_b_reordered_gemm_cpp(
     options.use_buffer_ops = False
     options.wave_runtime = True
     options.use_wave_asm_backend = True
+    options.use_buffer_ops = True
     options.dump_intermediates = "build/intermediates"
     schedule = get_mxfp4_asymmetric_schedule(is_bscale_shuffled=True)
     options.print_ir_after = "all" if is_debug else []
