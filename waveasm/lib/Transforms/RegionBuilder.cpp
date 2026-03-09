@@ -295,12 +295,20 @@ IfOp RegionBuilder::buildIfFromSCFIf(scf::IfOp ifOp) {
     return nullptr;
   }
 
-  // Convert condition to sreg if it's an immediate
-  // (arith.cmpi maps result to immediate placeholder)
+  // Convert condition to SGPR if needed.
+  // Immediates come from arith.cmpi mapping results to immediate placeholders.
+  // VGPRs come from arith.select chains (e.g. workgroup reordering Piecewise
+  // expressions) where all operands are uniform but the select handler
+  // materialises through V_CNDMASK_B32.  Reading lane 0 is safe because the
+  // condition is uniform across the wavefront.
   Value conditionValue = *condition;
   if (isa<ImmType>(conditionValue.getType())) {
     auto sregType = ctx.createSRegType();
     conditionValue = S_MOV_B32::create(builder, loc, sregType, conditionValue);
+  } else if (isVGPRType(conditionValue.getType())) {
+    auto sregType = ctx.createSRegType();
+    conditionValue =
+        V_READFIRSTLANE_B32::create(builder, loc, sregType, conditionValue);
   }
 
   // Infer result types by peeking at what the then region will yield
