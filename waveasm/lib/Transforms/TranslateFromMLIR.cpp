@@ -262,7 +262,7 @@ void TranslationContext::emitSRDPrologue() {
 
     // Step 2.5: Branch to aligned entry point (gfx95* requirement)
     // NOTE: Labels/branches are control flow and must remain as RawOp for now.
-    std::string kernelName = getKernelName(program);
+    std::string kernelName = getKernelName(program).str();
     std::string mainLabel = ".L_" + kernelName + "_main";
 
     RawOp::create(builder, loc, "s_branch " + mainLabel);
