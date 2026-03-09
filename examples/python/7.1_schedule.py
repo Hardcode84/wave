@@ -347,10 +347,14 @@ def test_dbuf_4wave_mxfp_preshuffle_b_gemm_cpp(
 def test_dbuf_4wave_mxfp_preshuffle_b_reordered_gemm_cpp(
     is_debug=False, shape=(1024, 1024, 8192), block=(128, 256, 256)
 ):
-    """Preshuffle-B MXFP4 GEMM with workgroup reordering using C++ WaveASM backend."""
+    """Preshuffle-B MXFP4 GEMM with workgroup reordering and dynamic shapes using C++ WaveASM backend."""
     gemm, options = get_tagged_mxfp4_gemm_preshuffle_b(
         shape, block, wave_shape=(1, 4), reorder_workgroups=True, group_size_n=32
     )
+    dynamic_symbols = [tkl.sym.M, tkl.sym.N, tkl.sym.K]
+    for sym in dynamic_symbols:
+        del options.subs[sym]
+    options.dynamic_symbols = dynamic_symbols
     options.backend = "asm"
     options.use_buffer_ops = False
     options.wave_runtime = True
@@ -362,7 +366,9 @@ def test_dbuf_4wave_mxfp_preshuffle_b_reordered_gemm_cpp(
     gemm = wave_compile(options, gemm, schedule)
 
     _run_mxfp_gemm_preshuffle(gemm, shape, all=True)
-    print("MXFP GEMM preshuffle-B 4-wave reordered (WaveASM backend) test passed!")
+    print(
+        "MXFP GEMM preshuffle-B 4-wave reordered dynamic (WaveASM backend) test passed!"
+    )
 
 
 def test_dbuf_4wave_mxfp_dynamic_preshuffle_b_gemm(
