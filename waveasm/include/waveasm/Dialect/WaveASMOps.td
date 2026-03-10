@@ -378,38 +378,40 @@ def WaveASM_ConstantOp : WAVEASMOp<"constant", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 def WaveASM_PackOp : WAVEASMOp<"pack", [Pure]> {
-  let summary = "Pack scalar VGPRs into a vector";
+  let summary = "Pack multiple registers into a wider register";
   let description = [{
-    Packs multiple scalar VGPRs into a vector VGPR.
+    Packs multiple registers into a wider register of the same register
+    file. Elements are packed lo-to-hi. Supports VGPRs, AGPRs, and SGPRs.
 
     Example:
     ```mlir
     %vec = waveasm.pack %v0, %v1, %v2, %v3 : (!waveasm.vreg, !waveasm.vreg, !waveasm.vreg, !waveasm.vreg) -> !waveasm.vreg<4>
+    %pair = waveasm.pack %s0, %s1 : (!waveasm.sreg, !waveasm.sreg) -> !waveasm.sreg<2, 2>
     ```
   }];
 
-  let arguments = (ins Variadic<WaveASM_AnyVGPR>:$elements);
-  let results = (outs WaveASM_AnyVGPR:$result);
+  let arguments = (ins Variadic<WaveASM_AnyReg>:$elements);
+  let results = (outs WaveASM_AnyReg:$result);
   let assemblyFormat = "$elements attr-dict `:` functional-type($elements, $result)";
 }
 
 def WaveASM_ExtractOp : WAVEASMOp<"extract", [Pure]> {
-  let summary = "Extract element(s) from a vector register (VGPR or AGPR)";
+  let summary = "Extract sub-register(s) from a wider register";
   let description = [{
-    Extracts element(s) from a vector register at a given offset.
-    Supports both VGPR and AGPR sources. When the source is an AGPR,
-    the result is also an AGPR - this preserves AGPR type information
-    so that downstream store handlers can insert v_accvgpr_read_b32.
+    Extracts element(s) from a wider register at a given offset.
+    Supports VGPRs, AGPRs, and SGPRs. The result register file must
+    match the source (VGPR->VGPR, AGPR->AGPR, SGPR->SGPR).
 
     Example:
     ```mlir
     %v0 = waveasm.extract %vec[0] : !waveasm.vreg<4> -> !waveasm.vreg
     %a0 = waveasm.extract %avec[0] : !waveasm.areg<4> -> !waveasm.areg
+    %lo = waveasm.extract %pair[0] : !waveasm.sreg<2, 2> -> !waveasm.sreg
     ```
   }];
 
-  let arguments = (ins WaveASM_AnyVecReg:$vector, I64Attr:$index);
-  let results = (outs WaveASM_AnyVecReg:$result);
+  let arguments = (ins WaveASM_AnyReg:$vector, I64Attr:$index);
+  let results = (outs WaveASM_AnyReg:$result);
   let assemblyFormat = "$vector `[` $index `]` attr-dict `:` type($vector) `->` type($result)";
   let hasVerifier = 1;
 }
