@@ -208,14 +208,6 @@ void TranslationContext::emitSRDPrologue() {
       PrecoloredSRegOp::create(builder, loc, preloadType, preloadBase,
                                /*size=*/2);
     }
-    for (const auto &pending : pendingScalarArgs) {
-      int64_t preloadBase = 2 + pending.argIndex * 2;
-      if (reservedPreloadBases.insert(preloadBase).second) {
-        auto preloadType = createSRegType(2, 2);
-        PrecoloredSRegOp::create(builder, loc, preloadType, preloadBase,
-                                 /*size=*/2);
-      }
-    }
   }
 
   if (isGFX95) {
