@@ -36,8 +36,9 @@ using namespace mlir;
 
 namespace waveasm {
 
-// Returns floordiv(x, d) = floor(cvt_f32(x) * rcp(cvt_f32(d))) with
-// off-by-one correction. Valid for x, d < 2^23 (float precision limit).
+// Returns unsigned floordiv(x, d) via float reciprocal with off-by-one
+// correction. Valid for x, d < 2^23 (float precision limit). Both operands
+// must be non-negative when interpreted as unsigned 32-bit integers.
 static Value emitUnsignedFloordiv(Value x, Value d, OpBuilder &builder,
                                   Location loc, TranslationContext &ctx) {
   auto vregType = ctx.createVRegType();
@@ -55,9 +56,31 @@ static Value emitUnsignedFloordiv(Value x, Value d, OpBuilder &builder,
   Value oneVgpr = V_MOV_B32::create(builder, loc, vregType, oneConst);
   auto zeroImm = ctx.createImmType(0);
   auto zeroConst = ConstantOp::create(builder, loc, zeroImm, 0);
-  Value inc = V_CNDMASK_B32::create(builder, loc, vregType, zeroConst,
-                                    oneVgpr, zeroConst);
+  Value inc = V_CNDMASK_B32::create(builder, loc, vregType, zeroConst, oneVgpr,
+                                    zeroConst);
   return V_ADD_U32::create(builder, loc, vregType, q, inc);
+}
+
+// Returns signed floordiv(x, d) where d > 0. Handles negative x correctly
+// by mapping to the unsigned domain via the identity:
+//   floordiv(x, d) = unsigned_floordiv(x, d)           when x >= 0
+//   floordiv(x, d) = ~unsigned_floordiv(~x, d)         when x < 0
+// Proof: for x < 0, ~x = -x-1 (unsigned). Then ~((-x-1)/d) = -((-x-1)/d)-1
+//   = -((-x-1)/d + 1) = -ceildiv(-x, d) = floordiv(x, d).
+// Valid for |x|, d < 2^23.
+static Value emitSignedFloordiv(Value x, Value d, OpBuilder &builder,
+                                Location loc, TranslationContext &ctx) {
+  auto vregType = ctx.createVRegType();
+  // sign = x >> 31: 0x00000000 if x >= 0, 0xFFFFFFFF if x < 0.
+  auto thirtyOneImm = ctx.createImmType(31);
+  auto thirtyOneConst = ConstantOp::create(builder, loc, thirtyOneImm, 31);
+  Value sign = V_ASHRREV_I32::create(builder, loc, vregType, thirtyOneConst, x);
+  // adjustedX = x ^ sign: unchanged if x >= 0, ~x if x < 0.
+  Value adjustedX = V_XOR_B32::create(builder, loc, vregType, x, sign);
+  // Unsigned floordiv on the non-negative adjusted value.
+  Value q = emitUnsignedFloordiv(adjustedX, d, builder, loc, ctx);
+  // result = q ^ sign: unchanged if x >= 0, ~q if x < 0.
+  return V_XOR_B32::create(builder, loc, vregType, q, sign);
 }
 
 /// Handle affine.apply - compile affine expression to arithmetic instructions
@@ -416,10 +439,11 @@ LogicalResult handleAffineApply(Operation *op, TranslationContext &ctx) {
             return ExprResult(shiftResult, resultRange);
           }
         }
-        // Symbolic divisor fallback: floordiv(x, d) via float reciprocal
-        // with off-by-one correction.
+        // Symbolic divisor fallback: floordiv(x, d) via float reciprocal.
+        // Use signed variant to handle negative intermediates from affine
+        // expressions with negative constants (e.g. *-32 in reorder maps).
         {
-          Value qFixed = emitUnsignedFloordiv(lhs, rhs, builder, loc, ctx);
+          Value qFixed = emitSignedFloordiv(lhs, rhs, builder, loc, ctx);
           return ExprResult(qFixed, BitRange());
         }
       }
@@ -447,7 +471,8 @@ LogicalResult handleAffineApply(Operation *op, TranslationContext &ctx) {
             return ExprResult(shiftResult, resultRange);
           }
         }
-        // Symbolic divisor fallback: ceildiv(x, d) = floordiv(x + d - 1, d)
+        // Symbolic divisor fallback: ceildiv(x, d) = floordiv(x + d - 1, d).
+        // Use signed floordiv to handle negative intermediates.
         {
           auto oneImm = ctx.createImmType(1);
           auto oneConst = ConstantOp::create(builder, loc, oneImm, 1);
@@ -455,7 +480,7 @@ LogicalResult handleAffineApply(Operation *op, TranslationContext &ctx) {
               V_SUB_U32::create(builder, loc, vregType, rhs, oneConst);
           Value biased =
               V_ADD_U32::create(builder, loc, vregType, lhs, dMinus1);
-          Value qFixed = emitUnsignedFloordiv(biased, rhs, builder, loc, ctx);
+          Value qFixed = emitSignedFloordiv(biased, rhs, builder, loc, ctx);
           return ExprResult(qFixed, BitRange());
         }
       }
@@ -474,9 +499,10 @@ LogicalResult handleAffineApply(Operation *op, TranslationContext &ctx) {
             return ExprResult(andResult, resultRange);
           }
         }
-        // Symbolic divisor fallback: x mod d = x - floordiv(x, d) * d
+        // Symbolic divisor fallback: x mod d = x - floordiv(x, d) * d.
+        // Use signed floordiv to handle negative intermediates.
         {
-          Value q = emitUnsignedFloordiv(lhs, rhs, builder, loc, ctx);
+          Value q = emitSignedFloordiv(lhs, rhs, builder, loc, ctx);
           Value qd = V_MUL_LO_U32::create(builder, loc, vregType, q, rhs);
           Value rem = V_SUB_U32::create(builder, loc, vregType, lhs, qd);
           return ExprResult(rem, BitRange());
@@ -490,8 +516,8 @@ LogicalResult handleAffineApply(Operation *op, TranslationContext &ctx) {
     }
 
     LLVM_DEBUG(llvm::dbgs() << "WARNING: unhandled affine expression kind "
-                           << static_cast<int>(e.getKind())
-                           << ", falling back to baseValue\n");
+                            << static_cast<int>(e.getKind())
+                            << ", falling back to baseValue\n");
     return ExprResult(baseValue, BitRange());
   };
 
