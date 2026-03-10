@@ -379,8 +379,21 @@ LogicalResult handleFatRawBufferCast(Operation *op, TranslationContext &ctx) {
     return success();
   }
 
-  // No pending adjustment -- construct cache-swizzle SRD (used by
-  // gather_to_lds and other paths that need explicit buffer descriptors).
+  // No pending adjustment -- construct cache-swizzle SRD only when the
+  // result is consumed by gather_to_lds.  Regular buffer_load/store ops
+  // must not use swizzle SRDs (word3=0x27000 is incompatible).  Without
+  // this check, buffers that lost their PendingSRDBaseAdjust (e.g. due to
+  // workgroup reordering producing a static-zero reinterpret_cast offset)
+  // would incorrectly get swizzle SRDs for non-gather consumers.
+  bool hasGatherConsumer =
+      llvm::any_of(op->getResult(0).getUsers(), [](Operation *user) {
+        return user->getName().getStringRef() == "amdgpu.gather_to_lds";
+      });
+  if (!hasGatherConsumer) {
+    ctx.getMapper().mapValue(op->getResult(0), *srcMapped);
+    return success();
+  }
+
   bool hasCacheSwizzle = false;
   int64_t swizzleStride = 0;
   if (op->getNumOperands() >= 3) {
