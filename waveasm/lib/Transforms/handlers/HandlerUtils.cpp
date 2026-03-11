@@ -72,18 +72,16 @@ int64_t computeBufferSizeFromMemRef(MemRefType memrefType) {
     numElements *= dim;
   }
   if (hasDynamic) {
-    return 0xFFFFFFFF;
+    // Return a size that is large enough for any realistic buffer but
+    // strictly below the OOB sentinel byte offsets (0x7FFFFFFC for f32,
+    // 0x7FFFFFFF for i8).  This ensures the hardware rejects sentinel
+    // voffsets as OOB and returns zero instead of faulting.
+    return 0x7FFFFF00;
   }
   int64_t elementBytes = memrefType.getElementTypeBitWidth() / 8;
   if (elementBytes == 0)
     elementBytes = 1;
   int64_t size = numElements * elementBytes;
-  // The Wave compiler uses 0x7FFFFFFF as an OOB sentinel in dynamic
-  // bounds-check address selection.  If the computed SRD num_records is
-  // close to this sentinel, bump to 0xFFFFFFFF so gather_to_lds loads
-  // with sentinel voffsets don't fault on gfx950.
-  if (size >= 0x7FFFFF00)
-    size = 0xFFFFFFFF;
   return size;
 }
 
