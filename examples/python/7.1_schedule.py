@@ -369,7 +369,7 @@ def test_dbuf_4wave_mxfp_dynamic_mn_preshuffle_b_gemm(
     is_debug=False, shape=(1024, 1024, 8192), block=(128, 256, 256)
 ):
     """Preshuffle-B MXFP4 GEMM with dynamic M, N."""
-    gemm, options = get_tagged_mxfp4_gemm_preshuffle_b(shape, block, wave_shape=(1, 4), reorder_workgroups=False)
+    gemm, options = get_tagged_mxfp4_gemm_preshuffle_b(shape, block, wave_shape=(1, 4), reorder_workgroups=True)
     # Make M, N, K dynamic so the compiler does not specialize on problem size.
     dynamic_symbols = [tkl.sym.M, tkl.sym.N]
     for sym in dynamic_symbols:

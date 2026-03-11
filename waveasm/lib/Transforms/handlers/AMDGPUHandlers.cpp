@@ -469,10 +469,12 @@ LogicalResult handleFatRawBufferCast(Operation *op, TranslationContext &ctx) {
                     std::to_string(newSrdBase + 1) + ", 0x40400000";
   RawOp::create(builder, loc, or1);
 
-  // Use 0xFFFFFFFF for num_records to prevent OOB faults from dynamic
-  // bounds-check sentinel addresses (0x7FFFFFFF) used in gather_to_lds.
-  std::string mov2 =
-      "s_mov_b32 s" + std::to_string(newSrdBase + 2) + ", 0xFFFFFFFF";
+  // Copy num_records from the source SRD so that sentinel byte offsets
+  // (0x7FFFFFFF) remain OOB.  On GFX9, OOB buffer loads silently return
+  // zero — they do NOT fault.  Using 0xFFFFFFFF would make sentinel
+  // offsets in-bounds, causing the hardware to access unmapped memory.
+  std::string mov2 = "s_mov_b32 s" + std::to_string(newSrdBase + 2) +
+                     ", s" + std::to_string(srcSrdBase + 2);
   RawOp::create(builder, loc, mov2);
 
   std::string mov3 =

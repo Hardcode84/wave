@@ -39,11 +39,12 @@ func.func @buffer_ops_test(%arg0: memref<f16>, %arg1: memref<f32>) {
 
   // The load SRD should be adjusted with the workgroup offset via SALU:
   //   s_mov_b64 (copy base), v_readfirstlane_b32 (wg offset to SGPR),
-  //   s_mul_i32 (byte offset), s_add_u32 + s_addc_u32 (adjust base),
+  //   s_mul_hi_i32 + s_mul_i32 (signed 64-bit byte offset),
+  //   s_add_u32 + s_addc_u32 (adjust base),
   //   s_mov_b32 (num_records = exact byte size, below OOB sentinel).
   // CHECK: s_mov_b64 s[{{[0-9]+}}:{{[0-9]+}}], s[{{[0-9]+}}:{{[0-9]+}}]
   // CHECK: waveasm.v_readfirstlane_b32
-  // CHECK: waveasm.s_mul_hi_u32
+  // CHECK: waveasm.s_mul_hi_i32
   // CHECK: waveasm.s_mul_i32
   // CHECK: waveasm.s_add_u32
   // CHECK: waveasm.s_addc_u32
@@ -74,7 +75,7 @@ func.func @buffer_ops_test(%arg0: memref<f16>, %arg1: memref<f32>) {
   // The store SRD should also be adjusted, with exact byte size below OOB sentinel.
   // CHECK: s_mov_b64 s[{{[0-9]+}}:{{[0-9]+}}], s[{{[0-9]+}}:{{[0-9]+}}]
   // CHECK: waveasm.v_readfirstlane_b32
-  // CHECK: waveasm.s_mul_hi_u32
+  // CHECK: waveasm.s_mul_hi_i32
   // CHECK: waveasm.s_mul_i32
   // CHECK: waveasm.s_add_u32
   // CHECK: waveasm.s_addc_u32
