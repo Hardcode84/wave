@@ -593,14 +593,32 @@ def WaveASM_V_LSHL_OR_B32 : VALUTernaryOp<"v_lshl_or_b32">;
 // Fused shift-add operation: dst = (src << shift) + addend
 def WaveASM_V_LSHL_ADD_U32 : VALUTernaryOp<"v_lshl_add_u32">;
 
-// Conditional mask and lane operations
-// V_CNDMASK_B32 implicitly reads VCC, so it must NOT have Pure or
-// ArithmeticOp traits (which would make CSE treat two instances with
-// identical explicit operands as equivalent even when VCC differs).
+// Conditional mask and lane operations.
+//
+// V_CNDMASK_B32 selects per-lane between src0 and src1 based on VCC.
+// The hardware instruction reads VCC implicitly (VOP2 encoding), so
+// the assembly emitter drops the vcc_dep operand and always emits
+// "vcc" as the condition source.
+//
+// vcc_dep exists solely to create a def-use edge to the preceding
+// v_cmp that wrote VCC.  Without it, no SSA dependency prevents
+// reordering v_cndmask before the comparison.
+//
+// Must NOT carry Pure or ArithmeticOp -- CSE would merge two
+// v_cndmask ops that share explicit operands but read different VCC
+// values from different comparisons.
 def WaveASM_V_CNDMASK_B32 : WAVEASMOp<"v_cndmask_b32", []> {
-  let arguments = (ins WaveASM_VALUSrc:$src0, WaveASM_VALUSrc:$src1, WaveASM_VALUSrc:$src2);
+  let summary = "Conditional select per lane via implicit VCC read.";
+  let arguments = (ins
+    WaveASM_VALUSrc:$src0,
+    WaveASM_VALUSrc:$src1,
+    WaveASM_VALUSrc:$vcc_dep
+  );
   let results = (outs WaveASM_AnyVGPR:$dst);
-  let assemblyFormat = "$src0 `,` $src1 `,` $src2 attr-dict `:` type($src0) `,` type($src1) `,` type($src2) `->` type($dst)";
+  let assemblyFormat = [{
+    $src0 `,` $src1 `,` $vcc_dep attr-dict `:`
+    type($src0) `,` type($src1) `,` type($vcc_dep) `->` type($dst)
+  }];
 }
 
 // Lane read operations (VGPR -> SGPR)
