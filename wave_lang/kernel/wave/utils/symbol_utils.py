@@ -478,7 +478,7 @@ def extract_iv(
     if iv not in base.free_symbols:
         return (coeff, base)
 
-    # iv is stuck inside floor/Mod — apply decomposition identities.
+    # iv is stuck inside floor/Mod -- apply decomposition identities.
     return _extract_iv_from_floor_mod(expr, iv)
 
 
@@ -540,27 +540,20 @@ def _extract_iv_from_floor_mod(
 
     return None
 
+
 def simplify(expr: sympy.Expr) -> sympy.Expr:
-    """Simplify a sympy expression using interval arithmetic and cancel.
+    """Simplify a sympy expression via ixsimpl roundtrip.
 
-    Extends sympy.cancel with bounds-based reasoning that can resolve
-    floor/Mod sub-expressions (e.g. floor(Mod(x,16)/16) -> 0) that standard
-    sympy cannot handle, plus custom algebraic rewrites for Mod/floor
-    patterns.  Iterates to a fixed point.
-
-    Uses sympy.cancel instead of sympy.simplify because simplify tries 20+
-    strategies (trigsimp, combsimp, hyperexpand, ...) that are irrelevant for
-    integer floor/Mod arithmetic and can take 0.5s+ per expression.
-
-    The cache maps both ``src -> dst`` and ``dst -> dst`` so that calling
-    simplify on an already-simplified expression is a cache hit.
+    Delegates to ``ixs_simplify`` which handles bounds reasoning,
+    floor/Mod rewrites, and rational cancellation natively.
+    Falls back to a sympy expand + cancel loop on conversion errors.
     """
     if not isinstance(expr, sympy.Basic):
         return expr
-    if expr in _simplify_cache:
-        return _simplify_cache[expr]
-    orig = expr
-    # Cheap flatten before the heavier fixed-point loop.
+    result = ixs_simplify(expr)
+    if result is not expr:
+        return result
+    # Fallback: ixs_simplify returned expr unchanged (conversion error).
     expr = sympy.expand(expr)
     for _ in range(5):
         new_expr = _bounds_simplify_once(expr)
@@ -569,8 +562,6 @@ def simplify(expr: sympy.Expr) -> sympy.Expr:
         if new_expr == expr:
             break
         expr = new_expr
-    _simplify_cache[orig] = expr
-    _simplify_cache[expr] = expr
     return expr
 
 
