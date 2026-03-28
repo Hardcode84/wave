@@ -1320,6 +1320,9 @@ def _generate_asm_code(mb, options):
         mlir_file.write(kernel_mlir)
         mlir_path = mlir_file.name
 
+    import shutil
+    shutil.copy2(mlir_path, "/tmp/kernel_input.mlir")
+
     try:
         base_passes = [
             "--mlir-cse",
@@ -1340,6 +1343,7 @@ def _generate_asm_code(mb, options):
         #   (1,4): wg=(64,4,1)  == waves_in_m=1, waves_in_n=4 == off
         #   (2,2): wg=(128,2,1) == waves_in_m=2, waves_in_n=2 == on
         #   (4,1): wg=(256,1,1) == waves_in_m=4, waves_in_n=1 == off
+        HW_VGPR_LIMIT = 256
         threads_per_wave = 64
         waves_in_m = wg[0] // threads_per_wave
         waves_in_n = wg[1]
@@ -1351,7 +1355,7 @@ def _generate_asm_code(mb, options):
         )
         tail_passes = [
             "--waveasm-scc-verifier",
-            "--waveasm-linear-scan=max-vgprs=512 max-agprs=512",
+            f"--waveasm-linear-scan=max-vgprs=512 max-agprs=512",
             "--waveasm-vgpr-compaction",
             waitcnt_flag,
             f"--waveasm-hazard-mitigation=target={options.target}",
@@ -1373,8 +1377,6 @@ def _generate_asm_code(mb, options):
 
         import re
 
-        HW_VGPR_LIMIT = 256
-
         # loop-address-promotion converts per-iteration LDS address
         # arithmetic (V_ADD_U32) into precomputed rotating VGPR iter-args,
         # removing VALU ops from the critical path.  The trade-off is extra
@@ -1383,16 +1385,27 @@ def _generate_asm_code(mb, options):
         # past the gfx9 hardware limit of 256.  We try with the pass
         # first and fall back without it when the limit is exceeded.
         result = _run_translate(["--waveasm-loop-address-promotion"])
-        if result.returncode == 0:
+        needs_fallback = result.returncode != 0
+        if not needs_fallback:
             m = re.search(r"\.vgpr_count:\s*(\d+)", result.stdout)
-            if m and int(m.group(1)) > HW_VGPR_LIMIT:
-                result = _run_translate([])
+            promoted_count = int(m.group(1)) if m else 0
+            if promoted_count > HW_VGPR_LIMIT:
+                needs_fallback = True
+        if needs_fallback:
+            result = _run_translate([])
 
         if result.returncode != 0:
             raise RuntimeError(f"waveasm-translate failed:\n{result.stderr}")
+        if result.stderr:
+            import sys
+            print(f"waveasm-translate warnings:\n{result.stderr}", file=sys.stderr)
         asm_text = result.stdout
     finally:
         os.unlink(mlir_path)
+
+    m = re.search(r"\.vgpr_count:\s*(\d+)", asm_text)
+    if m and int(m.group(1)) > HW_VGPR_LIMIT:
+        asm_text = _spill_high_vgprs_to_agprs(asm_text, HW_VGPR_LIMIT)
 
     if options.dump_intermediates:
         asm_path = os.path.join(options.dump_intermediates, f"{kernel_name}.rocmasm")
@@ -1401,6 +1414,168 @@ def _generate_asm_code(mb, options):
             f.write(asm_text)
 
     return asm_text
+
+
+def _spill_high_vgprs_to_agprs(asm_text: str, hw_limit: int) -> str:
+    """Rewrite assembly to spill VGPRs >= hw_limit into AGPRs.
+
+    After register allocation and compaction the kernel may require a few
+    more VGPRs than the hardware supports (e.g. 260 vs 256).  This pass
+    rewrites the assembly text to keep those values in spare AGPRs and
+    inserts v_accvgpr_read/write around each use.  v14 and v15 are used
+    as scratch (both are reserved by the compaction pass).
+    """
+    import re
+
+    vgpr_m = re.search(r"\.vgpr_count:\s*(\d+)", asm_text)
+    agpr_m = re.search(r"\.agpr_count:\s*(\d+)", asm_text)
+    if not vgpr_m:
+        return asm_text
+    vgpr_count = int(vgpr_m.group(1))
+    agpr_base = int(agpr_m.group(1)) if agpr_m else 0
+    if vgpr_count <= hw_limit:
+        return asm_text
+
+    high_vgprs = set(range(hw_limit, vgpr_count))
+    vgpr_to_agpr = {v: agpr_base + (v - hw_limit) for v in high_vgprs}
+
+    SCRATCH_POOL = (14, 15)
+    _high_re = re.compile(
+        r"\bv(" + "|".join(str(v) for v in sorted(high_vgprs)) + r")\b"
+    )
+    _v14_re = re.compile(r"\bv14\b")
+    _v15_re = re.compile(r"\bv15\b")
+
+    store_prefixes = ("buffer_store", "ds_write", "global_store", "flat_store")
+    async_load_prefixes = (
+        "buffer_load", "ds_read", "global_load", "flat_load",
+    )
+    mfma_prefix = "v_mfma_"
+
+    def _classify_operands(stripped: str, distinct: list[int]):
+        """Return (dest_set, src_set) of high VGPR indices."""
+        is_store = any(stripped.startswith(p) for p in store_prefixes)
+        is_mfma = stripped.startswith(mfma_prefix)
+        if is_store or is_mfma:
+            return set(), set(distinct)
+
+        is_async_load = any(stripped.startswith(p) for p in async_load_prefixes)
+        if is_async_load and "lds" in stripped:
+            return set(), set(distinct)
+
+        comma_pos = stripped.find(",")
+        if comma_pos < 0:
+            return set(distinct), set()
+
+        dests, srcs = set(), set()
+        for v in distinct:
+            pat = re.compile(rf"\bv{v}\b")
+            positions = [m.start() for m in pat.finditer(stripped)]
+            for pos in positions:
+                if pos < comma_pos:
+                    dests.add(v)
+                else:
+                    srcs.add(v)
+        return dests, srcs
+
+    def _is_async_load(stripped: str) -> bool:
+        return any(stripped.startswith(p) for p in async_load_prefixes) and "lds" not in stripped
+
+    def _available_scratches(stripped: str) -> list[int]:
+        """Return scratch registers not already used as low operands."""
+        avail = []
+        for s in SCRATCH_POOL:
+            if s in high_vgprs:
+                avail.append(s)
+                continue
+            pat = _v14_re if s == 14 else _v15_re
+            if not pat.search(stripped):
+                avail.append(s)
+        return avail if avail else [SCRATCH_POOL[0]]
+
+    out_lines: list[str] = []
+    indent = "  "
+    scratch_agpr_cache: dict[int, int] = {}
+    for raw_line in asm_text.splitlines(keepends=True):
+        stripped = raw_line.lstrip().rstrip("\n")
+        found = _high_re.findall(stripped)
+        if not found:
+            out_lines.append(raw_line)
+            scratch_agpr_cache.clear()
+            continue
+
+        distinct = list(dict.fromkeys(int(x) for x in found))
+        dests, srcs = _classify_operands(stripped, distinct)
+        avail = _available_scratches(stripped)
+
+        src_highs = [v for v in distinct if v in srcs]
+        dest_only = [v for v in distinct if v in dests and v not in srcs]
+
+        scratch_map: dict[int, int] = {}
+        for i, v in enumerate(src_highs):
+            scratch_map[v] = avail[min(i, len(avail) - 1)]
+        for v in dest_only:
+            scratch_map[v] = avail[0]
+
+        need_reload = srcs
+        need_spill = dests
+
+        any_reload = False
+        for v in distinct:
+            if v in need_reload:
+                scr = scratch_map[v]
+                a = vgpr_to_agpr[v]
+                if scratch_agpr_cache.get(scr) == a:
+                    pass
+                else:
+                    out_lines.append(f"{indent}v_accvgpr_read_b32 v{scr}, a{a}\n")
+                    scratch_agpr_cache[scr] = a
+                    any_reload = True
+        if any_reload:
+            out_lines.append(f"{indent}s_nop 0\n")
+
+        new_line = stripped
+        for v in distinct:
+            new_line = re.sub(rf"\bv{v}\b", f"v{scratch_map[v]}", new_line)
+        out_lines.append(indent + new_line + "\n")
+
+        scratch_agpr_cache.clear()
+        async_def = _is_async_load(stripped) and need_spill
+        for v in distinct:
+            if v in need_spill:
+                scr = scratch_map[v]
+                a = vgpr_to_agpr[v]
+                if async_def:
+                    out_lines.append(f"{indent}s_waitcnt vmcnt(0)\n")
+                    async_def = False
+                out_lines.append(f"{indent}v_accvgpr_write_b32 a{a}, v{scr}\n")
+                scratch_agpr_cache[scr] = a
+
+    result = "".join(out_lines)
+    result = re.sub(
+        r"\.vgpr_count:\s*\d+",
+        f".vgpr_count: {hw_limit}",
+        result,
+    )
+    new_agpr_count = agpr_base + len(high_vgprs)
+    result = re.sub(
+        r"\.agpr_count:\s*\d+",
+        f".agpr_count: {new_agpr_count}",
+        result,
+    )
+
+    gran = 8
+    next_free_vgpr = ((hw_limit + gran - 1) // gran) * gran
+    next_free_agpr = ((new_agpr_count + gran - 1) // gran) * gran
+    accum_offset = min(max(4, ((next_free_vgpr + 3) // 4) * 4), 256)
+    unified_next_free = accum_offset + next_free_agpr
+    result = re.sub(
+        r"\.amdhsa_next_free_vgpr\s+\d+",
+        f".amdhsa_next_free_vgpr {unified_next_free}",
+        result,
+    )
+
+    return result
 
 
 def _compile_asm_to_binary(asm_code, options):

@@ -794,6 +794,7 @@ LogicalResult handleMathFma(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorBroadcast(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorExtract(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorInsert(Operation *op, TranslationContext &ctx);
+LogicalResult handleVectorFromElements(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorShapeCast(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorBitCast(Operation *op, TranslationContext &ctx);
 LogicalResult handleVectorFma(Operation *op, TranslationContext &ctx);
@@ -2002,6 +2003,7 @@ void OpHandlerRegistry::registerDefaultHandlers(mlir::MLIRContext *ctx) {
   REGISTER_HANDLER(vector::BroadcastOp, handleVectorBroadcast);
   REGISTER_HANDLER(vector::ExtractOp, handleVectorExtract);
   REGISTER_HANDLER(vector::InsertOp, handleVectorInsert);
+  REGISTER_HANDLER(vector::FromElementsOp, handleVectorFromElements);
   REGISTER_HANDLER(vector::ShapeCastOp, handleVectorShapeCast);
   REGISTER_HANDLER(vector::BitCastOp, handleVectorBitCast);
   REGISTER_HANDLER(vector::TransferReadOp, handleVectorTransferRead);
@@ -2234,7 +2236,8 @@ LogicalResult translateModule(ModuleOp module, StringRef targetId) {
 
     // Second pass: translate all operations
     for (Operation &op : funcOp.getBody().front()) {
-      (void)translateOperation(&op, ctx);
+      if (failed(translateOperation(&op, ctx)))
+        return failure();
     }
 
     // Emit endpgm
@@ -2418,7 +2421,8 @@ LogicalResult translateModule(ModuleOp module,
 
     // Second pass: translate all operations
     for (Operation &op : funcOp.getBody().front()) {
-      (void)translateOperation(&op, transCtx);
+      if (failed(translateOperation(&op, transCtx)))
+        return failure();
     }
 
     // Emit endpgm

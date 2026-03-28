@@ -148,6 +148,8 @@ mlir::LogicalResult handleVectorExtract(mlir::Operation *op,
                                         TranslationContext &ctx);
 mlir::LogicalResult handleVectorInsert(mlir::Operation *op,
                                        TranslationContext &ctx);
+mlir::LogicalResult handleVectorFromElements(mlir::Operation *op,
+                                             TranslationContext &ctx);
 mlir::LogicalResult handleVectorShapeCast(mlir::Operation *op,
                                           TranslationContext &ctx);
 mlir::LogicalResult handleVectorBitCast(mlir::Operation *op,

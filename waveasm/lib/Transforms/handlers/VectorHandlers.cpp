@@ -27,7 +27,9 @@
 
 #include "waveasm/Dialect/WaveASMOps.h"
 #include "waveasm/Dialect/WaveASMTypes.h"
+#include "waveasm/Transforms/TranslateFromMLIR.h"
 
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "llvm/Support/Debug.h"
 
@@ -187,6 +189,116 @@ LogicalResult handleVectorReduction(Operation *op, TranslationContext &ctx) {
 
   // Simple fallback: just map the first element
   ctx.getMapper().mapValue(op->getResult(0), *vectorMapped);
+  return success();
+}
+
+/// Try to fuse 16 byte-granularity maskedloads feeding a from_elements into a
+/// single BUFFER_LOAD_DWORDX4.  Returns success() and maps the result when the
+/// pattern matches; returns failure() to fall through to generic packing.
+static LogicalResult tryFuseByteLoads(vector::FromElementsOp fromElemOp,
+                                      TranslationContext &ctx,
+                                      OpBuilder &builder, Location loc) {
+  auto vecType = fromElemOp.getDest().getType();
+  if (vecType.getNumElements() != 16 ||
+      vecType.getElementType().getIntOrFloatBitWidth() != 8)
+    return failure();
+
+  SmallVector<vector::MaskedLoadOp> maskedLoads;
+  for (Value elem : fromElemOp.getElements()) {
+    auto extractOp = elem.getDefiningOp<vector::ExtractOp>();
+    if (!extractOp)
+      return failure();
+    auto positions = extractOp.getStaticPosition();
+    if (positions.size() != 1 || positions[0] != 0)
+      return failure();
+    auto mlOp = extractOp.getSource().getDefiningOp<vector::MaskedLoadOp>();
+    if (!mlOp)
+      return failure();
+    maskedLoads.push_back(mlOp);
+  }
+
+  auto firstLoad = maskedLoads[0];
+  Value baseMemref = firstLoad.getBase();
+  for (auto ml : maskedLoads)
+    if (ml.getBase() != baseMemref)
+      return failure();
+
+  auto memrefType = cast<MemRefType>(baseMemref.getType());
+  Value srd = lookupSRD(baseMemref, ctx, loc);
+  if (!srd)
+    return failure();
+
+  auto [voffset, instOffset] =
+      computeVOffsetFromIndices(memrefType, firstLoad.getIndices(), ctx, loc,
+                                baseMemref);
+
+  auto loadResults = emitBufferLoads(srd, voffset, instOffset, 16, ctx, loc);
+  if (loadResults.empty())
+    return failure();
+
+  ctx.getMapper().mapValue(fromElemOp.getResult(), loadResults[0]);
+  return success();
+}
+
+LogicalResult handleVectorFromElements(Operation *op,
+                                       TranslationContext &ctx) {
+  auto fromElemOp = cast<vector::FromElementsOp>(op);
+  auto &builder = ctx.getBuilder();
+  auto loc = op->getLoc();
+
+  // tryFuseByteLoads is disabled: it assumes the 16 maskedloads are
+  // contiguous but does not verify, causing wrong data when loads are
+  // scattered (e.g. preshuffled scale data).  The generic packing below
+  // correctly handles all orderings.
+
+  auto vecType = fromElemOp.getDest().getType();
+  int64_t numElements = vecType.getNumElements();
+  int64_t elemBitWidth = vecType.getElementType().getIntOrFloatBitWidth();
+  int64_t elemsPerDword = 32 / elemBitWidth;
+  int64_t numDwords = (numElements * elemBitWidth + 31) / 32;
+
+  SmallVector<Value> elements;
+  for (auto elem : fromElemOp.getElements()) {
+    auto mapped = ctx.getMapper().getMapped(elem);
+    if (!mapped)
+      return op->emitError("from_elements operand not mapped");
+    elements.push_back(*mapped);
+  }
+
+  auto vregType = ctx.createVRegType();
+
+  if (elemBitWidth >= 32) {
+    if (numDwords == 1) {
+      ctx.getMapper().mapValue(fromElemOp.getResult(), elements[0]);
+    } else {
+      auto wideType = ctx.createVRegType(numDwords, numDwords);
+      auto packResult =
+          PackOp::create(builder, loc, wideType, ValueRange(elements));
+      ctx.getMapper().mapValue(fromElemOp.getResult(), packResult);
+    }
+    return success();
+  }
+
+  SmallVector<Value> packedDwords;
+  for (int64_t d = 0; d < numDwords; ++d) {
+    int64_t base = d * elemsPerDword;
+    Value packed = elements[base];
+    for (int64_t i = 1; i < elemsPerDword && (base + i) < numElements; ++i) {
+      auto shiftImm = createImmConst(i * elemBitWidth, builder, loc, ctx);
+      packed = V_LSHL_OR_B32::create(builder, loc, vregType,
+                                     elements[base + i], shiftImm, packed);
+    }
+    packedDwords.push_back(packed);
+  }
+
+  if (numDwords == 1) {
+    ctx.getMapper().mapValue(fromElemOp.getResult(), packedDwords[0]);
+  } else {
+    auto wideType = ctx.createVRegType(numDwords, numDwords);
+    auto packResult =
+        PackOp::create(builder, loc, wideType, ValueRange(packedDwords));
+    ctx.getMapper().mapValue(fromElemOp.getResult(), packResult);
+  }
   return success();
 }
 

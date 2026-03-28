@@ -91,7 +91,7 @@ def approximate_difference(
 
 
 def _compute_offset(indices: list[IndexExpr], strides: list[IndexExpr]) -> IndexExpr:
-    return sum(i * s for i, s in zip(indices, strides))
+    return linearize_dims(indices, strides)
 
 
 def check_is_dynamic_vals_broadcasted(nodes: list[fx.Node]) -> bool:
@@ -223,33 +223,28 @@ def _check_contiguous_with_aligned_base(
 
     idxc = IndexingContext.current()
     strides = strides_from_symbolic_shape(idxc, array_shape, allow_mixed_shapes=True)
+    floor_to_exact = _infer_floor_to_exact(strides)
 
     def _make_aligned_index(offset_val: int) -> dict[IndexExpr, IndexSequence]:
         idx = deepcopy(index)
         idx[fastest_dim].start = _aligned * elements_per_thread + offset_val
         return idx
 
-    new_index = transform_index_on_mapping(
-        mapping,
-        symbolic_shape,
-        _make_aligned_index(0),
-        is_read=is_read,
-    )
-    prev_offset = _compute_offset(
-        [new_index[infer_dim(d)] for d in symbolic_shape],
-        strides,
-    )
-    for i in range(1, elements_per_thread):
-        new_index = transform_index_on_mapping(
+    def _get_offset(offset_val: int) -> IndexExpr:
+        new_idx = transform_index_on_mapping(
             mapping,
             symbolic_shape,
-            _make_aligned_index(i),
+            _make_aligned_index(offset_val),
             is_read=is_read,
         )
-        offset = _compute_offset(
-            [new_index[infer_dim(d)] for d in symbolic_shape],
-            strides,
-        )
+        dims = [new_idx[infer_dim(d)] for d in symbolic_shape]
+        if floor_to_exact:
+            dims = [d.subs(floor_to_exact) for d in dims]
+        return _compute_offset(dims, strides)
+
+    prev_offset = _get_offset(0)
+    for i in range(1, elements_per_thread):
+        offset = _get_offset(i)
         diff_expr = simplify(offset - prev_offset)
         if diff_expr != 1:
             return False
